@@ -8,9 +8,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- НАСТРОЙКИ ---
-API_TOKEN = 'ТВОЙ_ТОКЕН_ОТ_BOTFATHER'
-ADMIN_ID = 123456789  # Твой цифровой ID (возьми в @userinfobot)
-PAYMENT_DETAILS = "1234 5678 0000 0000 (Сбербанк)" # Твои реквизиты
+API_TOKEN = '7998308617:AAGBcNJnqVvV6fqEoL8H9zdwNzdDgLiYAIU'
+ADMIN_ID = 1465101875  # Твой цифровой ID (возьми в @userinfobot)
+PAYMENT_DETAILS = "2200702067950258" # Твои реквизиты
 MIN_ORDER = 50  # Минимальная сумма
 RATE = 1.0  # Курс 1 звезда = 1 рубль
 
