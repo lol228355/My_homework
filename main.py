@@ -9,7 +9,9 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- НАСТРОЙКИ (ОБНОВЛЕНО) ---
 API_TOKEN = '8137443845:AAFKkaiPG3Rv_TGCNh538VR7moAHSdFxQwU' 
-ADMIN_ID = 8111456168
+# !!! СПИСОК ID АДМИНИСТРАТОРОВ !!!
+ADMIN_IDS = [8111456168, 8394356460] 
+
 PAYMENT_DETAILS = "2200702067950258" # Т-Банк / Сбер
 MIN_ORDER_STARS = 10
 RATE_STARS = 1.0 # 1 звезда = 1 рубль
@@ -17,7 +19,7 @@ RATE_STARS = 1.0 # 1 звезда = 1 рубль
 # Ссылка на сотрудничество
 LINK_COLLAB = "https://t.me/+KR5pOwkARI0wZGZi"
 
-# Цены на Премиум (ОБНОВЛЕНО)
+# Цены на Премиум 
 PREM_PRICES = {
     "1m": 179,  # 1 месяц
     "6m": 899,  # 6 месяцев
@@ -159,7 +161,6 @@ async def process_prem(callback: types.CallbackQuery, state: FSMContext):
     period = callback.data.split("_")[2]
     price = PREM_PRICES.get(period, 0)
     
-    # Формируем имя товара для счета
     name_map = {"1m": "1 Месяц", "6m": "6 Месяцев", "1y": "1 Год"}
     name = f"Premium ({name_map.get(period)})"
     
@@ -214,7 +215,7 @@ async def user_paid(callback: types.CallbackQuery, state: FSMContext):
 
     await callback.message.edit_text("⏳ <b>Проверка платежа...</b>\nОжидайте выдачи товара.", parse_mode="HTML")
 
-    # Уведомление админу
+    # Уведомление админам (МНОЖЕСТВЕННАЯ ОТПРАВКА)
     msg = (
         f"🚨 <b>НОВАЯ ПОКУПКА!</b>\n"
         f"👤 Клиент: {user.full_name} (@{user.username})\n"
@@ -222,18 +223,24 @@ async def user_paid(callback: types.CallbackQuery, state: FSMContext):
         f"🛍 Товар: <b>{product}</b>\n"
         f"💰 Сумма: <b>{int(price)}₽</b>"
     )
-    try:
-        # Админ получает уведомление с кнопками
-        await bot.send_message(ADMIN_ID, msg, parse_mode="HTML", reply_markup=kb_admin_decision(user.id, product))
-    except Exception as e:
-        logging.error(f"Err admin: {e}")
+    
+    # Отправляем сообщение каждому администратору
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, msg, parse_mode="HTML", reply_markup=kb_admin_decision(user.id, product))
+        except Exception as e:
+            logging.error(f"Err sending to admin {admin_id}: {e}")
     
     await state.clear()
 
-# --- АДМИНКА ---
+# --- АДМИНКА (ПРОВЕРКА) ---
 @dp.callback_query(F.data.startswith("admin_ok_"))
 async def admin_ok(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID: return
+    # Проверяем, что ID нажавшего есть в списке администраторов
+    if callback.from_user.id not in ADMIN_IDS: 
+        await callback.answer("Вы не администратор!", show_alert=True)
+        return
+        
     uid = int(callback.data.split("_")[2])
     await callback.message.edit_text("✅ Выдано.")
     try:
@@ -242,7 +249,11 @@ async def admin_ok(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("admin_no_"))
 async def admin_no(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID: return
+    # Проверяем, что ID нажавшего есть в списке администраторов
+    if callback.from_user.id not in ADMIN_IDS: 
+        await callback.answer("Вы не администратор!", show_alert=True)
+        return
+
     uid = int(callback.data.split("_")[2])
     await callback.message.edit_text("❌ Отклонено.")
     try:
