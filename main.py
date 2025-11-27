@@ -13,7 +13,7 @@ API_TOKEN = '8137443845:AAFKkaiPG3Rv_TGCNh538VR7moAHSdFxQwU'
 ADMIN_IDS = [8111456168, 8394356460] 
 
 PAYMENT_DETAILS = "2200702067950258" # Т-Банк / Сбер
-MIN_ORDER_STARS = 10
+MIN_ORDER_STARS = 50
 RATE_STARS = 1.5 # 1 звезда = 1 рубль
 
 # Ссылка на сотрудничество
@@ -127,7 +127,7 @@ async def back_to_main(callback: types.CallbackQuery, state: FSMContext):
 async def category_stars(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"🌟 <b>Покупка Stars</b>\n"
-        f"Курс: 1 к {RATE_STARS}₽\n"
+        f"Курс: 1 звезда = {RATE_STARS}₽\n"
         f"Минимум: {MIN_ORDER_STARS} шт.\n\n"
         f"✍️ <b>Введите количество:</b>",
         parse_mode="HTML",
