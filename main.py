@@ -14,7 +14,7 @@ ADMIN_IDS = [8111456168, 8394356460]
 
 PAYMENT_DETAILS = "2200702067950258" # Т-Банк / Сбер
 MIN_ORDER_STARS = 10
-RATE_STARS = 1.0 # 1 звезда = 1 рубль
+RATE_STARS = 1.5 # 1 звезда = 1 рубль
 
 # Ссылка на сотрудничество
 LINK_COLLAB = "https://t.me/+KR5pOwkARI0wZGZi"
