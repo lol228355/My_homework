@@ -1,268 +1,215 @@
 import asyncio
 import logging
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- НАСТРОЙКИ (ОБНОВЛЕНО) ---
-API_TOKEN = '8137443845:AAFKkaiPG3Rv_TGCNh538VR7moAHSdFxQwU' 
-# !!! СПИСОК ID АДМИНИСТРАТОРОВ !!!
-ADMIN_IDS = [8111456168, 8394356460] 
+# --- КОНФИГУРАЦИЯ ---
+TOKEN = "8315937988:AAHaKhMNy0t-uXQjSumvkDk3nf2vyTHf63U"  # Возьмите у @BotFather
 
-PAYMENT_DETAILS = "2200702067950258" # Т-Банк / Сбер
-MIN_ORDER_STARS = 50
-RATE_STARS = 1.5 # 1 звезда = 1 рубль
-
-# Ссылка на сотрудничество
-LINK_COLLAB = "https://t.me/+KR5pOwkARI0wZGZi"
-
-# Цены на Премиум 
-PREM_PRICES = {
-    "1m": 179,  # 1 месяц
-    "6m": 899,  # 6 месяцев
-    "1y": 1399  # 1 год
-}
-
-# --- СПИСОК NFT ---
-NFT_PRICES = {
-    "nft_anon_1": {"name": "+888 00 123 45", "price": 1500},
-    "nft_anon_2": {"name": "+888 09 777 77", "price": 5000},
-    "nft_user_1": {"name": "@king", "price": 99000},
-    "nft_user_2": {"name": "@boss_shop", "price": 4500},
-    "nft_punk":   {"name": "TON Punk #304", "price": 2300},
-    "nft_diamond": {"name": "TON Diamond", "price": 7000},
-    "nft_fish":   {"name": "Ton Fish #1", "price": 150},
-    "nft_dns":    {"name": "wallet.ton", "price": 12000},
-    "nft_rock":   {"name": "Ether Rock", "price": 500},
-    "nft_cat":    {"name": "Rich Cat #55", "price": 800}
-}
-
-# Логирование
+# --- НАСТРОЙКА ЛОГОВ И БОТА ---
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN)
+bot = Bot(token=TOKEN, parse_mode="HTML")
 dp = Dispatcher(storage=MemoryStorage())
 
+# --- БАЗА ДАННЫХ (Временная, в памяти) ---
+user_db = {}  # Формат: {user_id: {'balance': 100.0}}
+
 # --- МАШИНА СОСТОЯНИЙ ---
-class ShopState(StatesGroup):
-    entering_stars_amount = State()
-    confirm_payment = State()
+class GameState(StatesGroup):
+    choosing_game = State()
+    waiting_for_bet = State()
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+def get_user(user_id):
+    if user_id not in user_db:
+        user_db[user_id] = {'balance': 10.0} # Стартовый бонус 10$
+    return user_db[user_id]
+
+def format_balance(amount):
+    return f"<b>{amount:.2f}$</b>"
 
 # --- КЛАВИАТУРЫ ---
+def main_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎲 Кубик", callback_data="game_dice"),
+         InlineKeyboardButton(text="🏀 Баскет", callback_data="game_basketball")],
+        [InlineKeyboardButton(text="🎯 Дартс", callback_data="game_darts"),
+         InlineKeyboardButton(text="🎳 Боулинг", callback_data="game_bowling")],
+        [InlineKeyboardButton(text="🎰 Слоты (777)", callback_data="game_slot")],
+        [InlineKeyboardButton(text="💳 Мой баланс", callback_data="balance")]
+    ])
 
-def kb_main_menu():
-    buttons = [
-        [InlineKeyboardButton(text="🌟 Купить Stars", callback_data="cat_stars")],
-        [InlineKeyboardButton(text="💎 Premium", callback_data="cat_prem"),
-         InlineKeyboardButton(text="🖼 NFT Market", callback_data="cat_nft")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+def back_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад в меню", callback_data="menu")]
+    ])
 
-def kb_prem_menu():
-    buttons = [
-        [InlineKeyboardButton(text=f"🗓 1 Месяц - {PREM_PRICES['1m']}₽", callback_data="buy_prem_1m")],
-        [InlineKeyboardButton(text=f"🗓 6 Месяцев - {PREM_PRICES['6m']}₽", callback_data="buy_prem_6m")],
-        [InlineKeyboardButton(text=f"🗓 1 Год - {PREM_PRICES['1y']}₽", callback_data="buy_prem_1y")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def kb_nft_menu():
-    buttons = []
-    row = []
-    for key, val in NFT_PRICES.items():
-        btn_text = f"{val['name']} — {val['price']}₽"
-        row.append(InlineKeyboardButton(text=btn_text, callback_data=f"buy_nft_{key}"))
-        
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-            
-    if row:
-        buttons.append(row)
-    
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def kb_cancel():
-    buttons = [[InlineKeyboardButton(text="❌ Отмена", callback_data="back_main")]]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def kb_check_payment():
-    buttons = [
-        [InlineKeyboardButton(text="✅ Я оплатил", callback_data="paid_check")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="back_main")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def kb_admin_decision(user_id, product_name):
-    buttons = [
-        [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin_ok_{user_id}")],
-        [InlineKeyboardButton(text="🚫 Отклонить", callback_data=f"admin_no_{user_id}")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-# --- ХЕНДЛЕРЫ ---
+# --- ХЕНДЛЕРЫ (ОБРАБОТЧИКИ) ---
 
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear()
+async def cmd_start(message: Message):
+    user = get_user(message.from_user.id)
     text = (
         f"👋 <b>Привет, {message.from_user.first_name}!</b>\n\n"
-        f"🛒 Добро пожаловать в цифровой магазин.\n"
-        f"🤝 <b>Партнер:</b> {LINK_COLLAB}\n\n"
-        f"👇 Выберите категорию:"
+        f"Добро пожаловать в <b>Emoji Casino</b>.\n"
+        f"Твой стартовый баланс: {format_balance(user['balance'])}\n\n"
+        f"👇 <i>Выбери игру ниже:</i>"
     )
-    await message.answer(text, parse_mode="HTML", reply_markup=kb_main_menu())
+    await message.answer(text, reply_markup=main_menu_kb())
 
-@dp.callback_query(F.data == "back_main")
-async def back_to_main(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "menu")
+async def cb_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("Главное меню:", reply_markup=kb_main_menu())
+    user = get_user(callback.from_user.id)
+    text = f"🏰 <b>Главное меню</b>\n💰 Баланс: {format_balance(user['balance'])}"
+    await callback.message.edit_text(text, reply_markup=main_menu_kb())
 
-# --- ЗВЕЗДЫ ---
-@dp.callback_query(F.data == "cat_stars")
-async def category_stars(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        f"🌟 <b>Покупка Stars</b>\n"
-        f"Курс: 1 звезда = {RATE_STARS}₽\n"
-        f"Минимум: {MIN_ORDER_STARS} шт.\n\n"
-        f"✍️ <b>Введите количество:</b>",
-        parse_mode="HTML",
-        reply_markup=kb_cancel()
-    )
-    await state.set_state(ShopState.entering_stars_amount)
+@dp.callback_query(F.data == "balance")
+async def cb_balance(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    await callback.answer(f"💰 Твой баланс: {user['balance']:.2f}$", show_alert=True)
 
-@dp.message(StateFilter(ShopState.entering_stars_amount))
-async def process_stars_amount(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        await message.answer("⚠️ Введите число.", reply_markup=kb_cancel())
-        return
+# --- ЛОГИКА ВЫБОРА ИГРЫ ---
+@dp.callback_query(F.data.startswith("game_"))
+async def cb_game_select(callback: CallbackQuery, state: FSMContext):
+    game_type = callback.data.split("_")[1]
     
-    amount = int(message.text)
-    if amount < MIN_ORDER_STARS:
-        await message.answer(f"⚠️ Минимум {MIN_ORDER_STARS} звезд.", reply_markup=kb_cancel())
-        return
-
-    price = amount * RATE_STARS
-    await state.update_data(product_type="stars", product_name=f"{amount} Stars", price=price)
-    await send_invoice(message, f"{amount} Stars", price)
-    await state.set_state(ShopState.confirm_payment)
-
-# --- ПРЕМИУМ ---
-@dp.callback_query(F.data == "cat_prem")
-async def category_prem(callback: types.CallbackQuery):
-    await callback.message.edit_text("💎 <b>Выберите период Premium:</b>", parse_mode="HTML", reply_markup=kb_prem_menu())
-
-@dp.callback_query(F.data.startswith("buy_prem_"))
-async def process_prem(callback: types.CallbackQuery, state: FSMContext):
-    period = callback.data.split("_")[2]
-    price = PREM_PRICES.get(period, 0)
+    # Сохраняем выбранную игру в память
+    await state.update_data(game_type=game_type)
+    await state.set_state(GameState.waiting_for_bet)
     
-    name_map = {"1m": "1 Месяц", "6m": "6 Месяцев", "1y": "1 Год"}
-    name = f"Premium ({name_map.get(period)})"
+    emoji_map = {
+        "dice": "🎲", "basketball": "🏀", "darts": "🎯", "bowling": "🎳", "slot": "🎰"
+    }
     
-    await state.update_data(product_type="premium", product_name=name, price=price)
-    await send_invoice(callback.message, name, price)
-    await state.set_state(ShopState.confirm_payment)
-
-# --- NFT ---
-@dp.callback_query(F.data == "cat_nft")
-async def category_nft(callback: types.CallbackQuery):
-    await callback.message.edit_text(
-        "🖼 <b>Доступные NFT лоты:</b>\n"
-        "Нажмите на товар для покупки.",
-        parse_mode="HTML", 
-        reply_markup=kb_nft_menu()
-    )
-
-@dp.callback_query(F.data.startswith("buy_nft_"))
-async def process_nft(callback: types.CallbackQuery, state: FSMContext):
-    nft_key = callback.data.split("buy_nft_")[1]
-    item = NFT_PRICES.get(nft_key)
+    user = get_user(callback.from_user.id)
     
-    if not item:
-        await callback.answer("Ошибка")
-        return
-
-    await state.update_data(product_type="nft", product_name=item['name'], price=item['price'])
-    await send_invoice(callback.message, item['name'], item['price'])
-    await state.set_state(ShopState.confirm_payment)
-
-# --- ФУНКЦИИ ОПЛАТЫ ---
-async def send_invoice(message: types.Message, product_name, price):
     text = (
-        f"🧾 <b>СЧЕТ НА ОПЛАТУ</b>\n\n"
-        f"🛍 <b>{product_name}</b>\n"
-        f"💰 <b>{int(price)}₽</b>\n\n"
-        f"💳 <b>Реквизиты:</b>\n"
-        f"<code>{PAYMENT_DETAILS}</code>\n\n"
-        f"⚠️ Оплатите точную сумму и нажмите кнопку подтверждения."
+        f"{emoji_map[game_type]} <b>Игра: {game_type.upper()}</b>\n\n"
+        f"💰 Твой баланс: {format_balance(user['balance'])}\n"
+        f"💵 <b>Введите сумму ставки</b> (например: 0.5 или 5):"
     )
+    
+    await callback.message.edit_text(text, reply_markup=back_kb())
+
+# --- ЛОГИКА ОБРАБОТКИ СТАВКИ И ИГРЫ ---
+@dp.message(GameState.waiting_for_bet)
+async def process_bet(message: Message, state: FSMContext):
     try:
-        await message.edit_text(text, parse_mode="HTML", reply_markup=kb_check_payment())
-    except:
-        await message.answer(text, parse_mode="HTML", reply_markup=kb_check_payment())
+        bet = float(message.text.replace(',', '.'))
+    except ValueError:
+        await message.answer("⚠️ <b>Ошибка!</b> Введите число. Например: 1.5")
+        return
 
-@dp.callback_query(F.data == "paid_check", StateFilter(ShopState.confirm_payment))
-async def user_paid(callback: types.CallbackQuery, state: FSMContext):
+    user = get_user(message.from_user.id)
+    
+    # Проверки
+    if bet < 0.1:
+        await message.answer("⚠️ Минимальная ставка: <b>0.1$</b>")
+        return
+    if bet > user['balance']:
+        await message.answer(f"⚠️ Недостаточно средств!\nВаш баланс: {format_balance(user['balance'])}")
+        return
+
+    # Списываем ставку
+    user['balance'] -= bet
     data = await state.get_data()
-    product = data.get('product_name')
-    price = data.get('price')
-    user = callback.from_user
-
-    await callback.message.edit_text("⏳ <b>Проверка платежа...</b>\nОжидайте выдачи товара.", parse_mode="HTML")
-
-    # Уведомление админам (МНОЖЕСТВЕННАЯ ОТПРАВКА)
-    msg = (
-        f"🚨 <b>НОВАЯ ПОКУПКА!</b>\n"
-        f"👤 Клиент: {user.full_name} (@{user.username})\n"
-        f"🆔 ID: <code>{user.id}</code>\n"
-        f"🛍 Товар: <b>{product}</b>\n"
-        f"💰 Сумма: <b>{int(price)}₽</b>"
-    )
+    game_type = data.get("game_type")
     
-    # Отправляем сообщение каждому администратору
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, msg, parse_mode="HTML", reply_markup=kb_admin_decision(user.id, product))
-        except Exception as e:
-            logging.error(f"Err sending to admin {admin_id}: {e}")
+    await message.answer(f"💸 Ставка <b>{bet}$</b> принята! Запускаем...")
     
+    # Бросаем дайс!
+    # Telegram сам генерирует результат (value)
+    if game_type == "slot":
+        dice_msg = await message.answer_dice(emoji="🎰")
+    elif game_type == "basketball":
+        dice_msg = await message.answer_dice(emoji="🏀")
+    elif game_type == "darts":
+        dice_msg = await message.answer_dice(emoji="🎯")
+    elif game_type == "bowling":
+        dice_msg = await message.answer_dice(emoji="🎳")
+    else:
+        dice_msg = await message.answer_dice(emoji="🎲")
+
+    # Ждем пока анимация проиграется (около 3-4 сек)
+    await asyncio.sleep(4)
+    
+    result_value = dice_msg.dice.value
+    win_amount = 0
+    is_win = False
+    
+    # --- ЛОГИКА ПОБЕДЫ ---
+    # 🎲 КУБИК (1-6)
+    if game_type == "dice":
+        # Победа, если выпало 4, 5 или 6. Коэфф 2.0
+        if result_value > 3:
+            is_win = True
+            win_amount = bet * 2
+
+    # 🏀 БАСКЕТБОЛ (1-5)
+    elif game_type == "basketball":
+        # 4 и 5 - это попадание в кольцо. Коэфф 2.5
+        if result_value in [4, 5]:
+            is_win = True
+            win_amount = bet * 2.5
+            
+    # 🎯 ДАРТС (1-6)
+    elif game_type == "darts":
+        # 6 - это "яблочко". Коэфф 4.0
+        if result_value == 6:
+            is_win = True
+            win_amount = bet * 4
+        # 5 - близко к центру. Возврат ставки
+        elif result_value == 5:
+             is_win = True
+             win_amount = bet
+
+    # 🎳 БОУЛИНГ (1-6)
+    elif game_type == "bowling":
+        # 6 - Страйк! Коэфф 5.0
+        if result_value == 6:
+            is_win = True
+            win_amount = bet * 5
+    
+    # 🎰 СЛОТЫ (1-64)
+    elif game_type == "slot":
+        # 64 - джекпот (три семерки). Коэфф 50
+        # 1, 22, 43 - маленькие выигрыши
+        if result_value == 64:
+            is_win = True
+            win_amount = bet * 50
+        elif result_value in [1, 22, 43]:
+            is_win = True
+            win_amount = bet * 3
+
+    # --- РЕЗУЛЬТАТ ---
+    if is_win:
+        user['balance'] += win_amount
+        await message.answer(
+            f"🎉 <b>ПОБЕДА!</b>\n"
+            f"Выпало значение: {result_value}\n"
+            f"Вы выиграли: <b>+{win_amount:.2f}$</b>\n"
+            f"💰 Текущий баланс: {format_balance(user['balance'])}",
+            reply_markup=back_kb()
+        )
+    else:
+        await message.answer(
+            f"😢 <b>Проигрыш...</b>\n"
+            f"Выпало значение: {result_value}\n"
+            f"💰 Текущий баланс: {format_balance(user['balance'])}",
+            reply_markup=back_kb()
+        )
+    
+    # Очищаем состояние, чтобы можно было снова выбрать игру
     await state.clear()
 
-# --- АДМИНКА (ПРОВЕРКА) ---
-@dp.callback_query(F.data.startswith("admin_ok_"))
-async def admin_ok(callback: types.CallbackQuery):
-    # Проверяем, что ID нажавшего есть в списке администраторов
-    if callback.from_user.id not in ADMIN_IDS: 
-        await callback.answer("Вы не администратор!", show_alert=True)
-        return
-        
-    uid = int(callback.data.split("_")[2])
-    await callback.message.edit_text("✅ Выдано.")
-    try:
-        await bot.send_message(uid, "✅ <b>Оплата получена!</b>\nТовар выдан/отправлен.", parse_mode="HTML")
-    except: pass
-
-@dp.callback_query(F.data.startswith("admin_no_"))
-async def admin_no(callback: types.CallbackQuery):
-    # Проверяем, что ID нажавшего есть в списке администраторов
-    if callback.from_user.id not in ADMIN_IDS: 
-        await callback.answer("Вы не администратор!", show_alert=True)
-        return
-
-    uid = int(callback.data.split("_")[2])
-    await callback.message.edit_text("❌ Отклонено.")
-    try:
-        await bot.send_message(uid, "❌ <b>Платеж не найден.</b>", parse_mode="HTML")
-    except: pass
-
+# --- ЗАПУСК ---
 async def main():
     print("Бот запущен...")
-    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
