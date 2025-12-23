@@ -11,8 +11,8 @@ from aiocryptopay import AioCryptoPay, Networks
 
 # --- ⚙️ КОНФИГУРАЦИЯ ---
 # ВСТАВЬТЕ СЮДА НОВЫЕ ТОКЕНЫ!
-BOT_TOKEN = "ВАШ_НОВЫЙ_ТОКЕН"
-CRYPTO_BOT_TOKEN = "ВАШ_НОВЫЙ_КРИПТО_ТОКЕН"
+BOT_TOKEN = "8315937988:AAHaKhMNy0t-uXQjSumvkDk3nf2vyTHf63U"
+CRYPTO_BOT_TOKEN = "505642:AATEFAUIQ3OE9ihgalDaLzhI4u7uH2CY0X5"
 HEADER_IMG_URL = "https://media1.tenor.com/m/JgYc2sQz9ZAAAAAC/money-cash.gif"
 
 logging.basicConfig(level=logging.INFO)
