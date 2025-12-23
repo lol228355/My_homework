@@ -6,13 +6,21 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.default import DefaultBotProperties # <--- ВАЖНЫЙ ИМПОРТ
 
 # --- КОНФИГУРАЦИЯ ---
-TOKEN = "8315937988:AAHaKhMNy0t-uXQjSumvkDk3nf2vyTHf63U"  # Возьмите у @BotFather
+TOKEN = "8315937988:AAHaKhMNy0t-uXQjSumvkDk3nf2vyTHf63U"  # Вставьте токен
 
 # --- НАСТРОЙКА ЛОГОВ И БОТА ---
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=TOKEN, parse_mode="HTML")
+
+# --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+# Теперь настройки передаются через DefaultBotProperties
+bot = Bot(
+    token=TOKEN, 
+    default=DefaultBotProperties(parse_mode="HTML")
+)
+
 dp = Dispatcher(storage=MemoryStorage())
 
 # --- БАЗА ДАННЫХ (Временная, в памяти) ---
@@ -99,6 +107,11 @@ async def cb_game_select(callback: CallbackQuery, state: FSMContext):
 # --- ЛОГИКА ОБРАБОТКИ СТАВКИ И ИГРЫ ---
 @dp.message(GameState.waiting_for_bet)
 async def process_bet(message: Message, state: FSMContext):
+    # Проверка на текст (чтобы не падало, если пришлют стикер)
+    if not message.text:
+        await message.answer("⚠️ Пожалуйста, введите число.")
+        return
+
     try:
         bet = float(message.text.replace(',', '.'))
     except ValueError:
@@ -123,7 +136,6 @@ async def process_bet(message: Message, state: FSMContext):
     await message.answer(f"💸 Ставка <b>{bet}$</b> принята! Запускаем...")
     
     # Бросаем дайс!
-    # Telegram сам генерирует результат (value)
     if game_type == "slot":
         dice_msg = await message.answer_dice(emoji="🎰")
     elif game_type == "basketball":
@@ -145,41 +157,34 @@ async def process_bet(message: Message, state: FSMContext):
     # --- ЛОГИКА ПОБЕДЫ ---
     # 🎲 КУБИК (1-6)
     if game_type == "dice":
-        # Победа, если выпало 4, 5 или 6. Коэфф 2.0
         if result_value > 3:
             is_win = True
             win_amount = bet * 2
 
     # 🏀 БАСКЕТБОЛ (1-5)
     elif game_type == "basketball":
-        # 4 и 5 - это попадание в кольцо. Коэфф 2.5
         if result_value in [4, 5]:
             is_win = True
             win_amount = bet * 2.5
             
     # 🎯 ДАРТС (1-6)
     elif game_type == "darts":
-        # 6 - это "яблочко". Коэфф 4.0
         if result_value == 6:
             is_win = True
             win_amount = bet * 4
-        # 5 - близко к центру. Возврат ставки
         elif result_value == 5:
              is_win = True
              win_amount = bet
 
     # 🎳 БОУЛИНГ (1-6)
     elif game_type == "bowling":
-        # 6 - Страйк! Коэфф 5.0
         if result_value == 6:
             is_win = True
             win_amount = bet * 5
     
     # 🎰 СЛОТЫ (1-64)
     elif game_type == "slot":
-        # 64 - джекпот (три семерки). Коэфф 50
-        # 1, 22, 43 - маленькие выигрыши
-        if result_value == 64:
+        if result_value == 64: # Джекпот
             is_win = True
             win_amount = bet * 50
         elif result_value in [1, 22, 43]:
@@ -204,12 +209,14 @@ async def process_bet(message: Message, state: FSMContext):
             reply_markup=back_kb()
         )
     
-    # Очищаем состояние, чтобы можно было снова выбрать игру
+    # Очищаем состояние
     await state.clear()
 
 # --- ЗАПУСК ---
 async def main():
     print("Бот запущен...")
+    # Удаляем старые апдейты, чтобы бот не отвечал на старые сообщения при запуске
+    await bot.delete_webhook(drop_pending_updates=True) 
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
