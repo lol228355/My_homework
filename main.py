@@ -9,10 +9,12 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 from aiocryptopay import AioCryptoPay, Networks
+from datetime import datetime
 
 # --- ⚙️ КОНФИГУРАЦИЯ ---
 BOT_TOKEN = "8315937988:AAHaKhMNy0t-uXQjSumvkDk3nf2vyTHf63U"
 CRYPTO_BOT_TOKEN = "505642:AATEFAUIQ3OE9ihgalDaLzhI4u7uH2CY0X5"
+GAME_CHAT_ID = None  # Укажите ID игрового чата здесь
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -31,23 +33,43 @@ except Exception as e:
     logger.error(f"Ошибка инициализации CryptoPay: {e}")
     crypto = None
 
-# Временная база данных в оперативной памяти
+# База данных в оперативной памяти
 user_db = {}
+transactions_db = []  # История транзакций
 
 def get_user(user_id):
     if user_id not in user_db:
-        user_db[user_id] = {'balance': 0.0, 'last_invoice_id': None}
+        user_db[user_id] = {
+            'balance': 0.0,
+            'last_invoice_id': None,
+            'username': '',
+            'games_played': 0,
+            'games_won': 0,
+            'total_deposit': 0.0,
+            'total_withdraw': 0.0,
+            'registration_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
     return user_db[user_id]
+
+def add_transaction(user_id, tx_type, amount, status="completed", details=""):
+    transactions_db.append({
+        'user_id': user_id,
+        'type': tx_type,  # deposit, withdraw, win, loss
+        'amount': amount,
+        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'status': status,
+        'details': details
+    })
 
 # Состояния FSM
 class BotStates(StatesGroup):
-    waiting_for_bet_amount = State()
     waiting_for_deposit_amount = State()
+    waiting_for_withdraw_amount = State()
+    waiting_for_withdraw_address = State()
 
 def format_balance(amount):
     return f"<b>{amount:.2f} $</b>"
 
-# Функция для извлечения числа из текста
 def extract_number(text):
     if not text:
         return None
@@ -60,37 +82,27 @@ def extract_number(text):
             return None
     return None
 
-# Функция для стилизации сообщений
-async def send_styled_message(target, text, reply_markup=None):
-    formatted_text = f"<blockquote>👾 <b>Emoji Casino</b> ❞</blockquote>\n\n{text}"
-    user_id = target.from_user.id
-    
-    if isinstance(target, CallbackQuery):
-        try:
-            await target.message.edit_text(text=formatted_text, reply_markup=reply_markup)
-        except:
-            await bot.send_message(chat_id=user_id, text=formatted_text, reply_markup=reply_markup)
-    else:
-        await bot.send_message(chat_id=user_id, text=formatted_text, reply_markup=reply_markup)
-
 # --- КЛАВИАТУРЫ ---
 def main_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎲 Кубик (x2)", callback_data="sel_dice"),
-         InlineKeyboardButton(text="🏀 Баскет (x2.5)", callback_data="sel_basketball")],
-        [InlineKeyboardButton(text="🎯 Дартс (Меню)", callback_data="menu_darts"),
-         InlineKeyboardButton(text="🎳 Боулинг (x5)", callback_data="sel_bowling")],
-        [InlineKeyboardButton(text="🎰 Слоты (x50)", callback_data="sel_slot")],
+        [InlineKeyboardButton(text="💰 Баланс", callback_data="check_balance")],
         [InlineKeyboardButton(text="💳 Пополнить", callback_data="deposit_start"),
-         InlineKeyboardButton(text="💰 Баланс", callback_data="check_balance")]
+         InlineKeyboardButton(text="💸 Вывести", callback_data="withdraw_start")],
+        [InlineKeyboardButton(text="📊 Профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="📋 История", callback_data="history")],
+        [InlineKeyboardButton(text="📚 Инструкция", callback_data="instructions")],
+        [InlineKeyboardButton(text="👨‍💻 Поддержка", callback_data="support")]
     ])
 
-def darts_menu_kb():
+def deposit_methods_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Мимо | 2.5x", callback_data="bets_darts_miss"),
-         InlineKeyboardButton(text="Красное | 1.7x", callback_data="bets_darts_red")],
-        [InlineKeyboardButton(text="Белое | 1.7x", callback_data="bets_darts_white"),
-         InlineKeyboardButton(text="Центр | 2.5x", callback_data="bets_darts_bullseye")],
+        [InlineKeyboardButton(text="💎 CryptoBot (USDT)", callback_data="deposit_crypto")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu")]
+    ])
+
+def withdraw_methods_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 USDT (TRC20)", callback_data="withdraw_usdt")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu")]
     ])
 
@@ -98,153 +110,139 @@ def check_payment_kb(pay_url):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔗 Оплатить через CryptoBot", url=pay_url)],
         [InlineKeyboardButton(text="✅ Проверить оплату", callback_data="check_deposit_status")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="main_menu")]
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu")]
     ])
 
-def cancel_deposit_kb():
+def cancel_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="main_menu")]
     ])
 
-# --- ОБРАБОТЧИКИ ---
+# --- ОБРАБОТЧИКИ КОМАНД ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user = get_user(message.from_user.id)
-    await send_styled_message(message, f"Добро пожаловать!\n\n💰 Твой баланс: {format_balance(user['balance'])}", main_menu_kb())
+    if not user['username'] and message.from_user.username:
+        user['username'] = f"@{message.from_user.username}"
+    
+    await message.answer(
+        "🎰 <b>Добро пожаловать в FRK Casino!</b>\n\n"
+        "🎮 <b>Как играть:</b>\n"
+        "1. Пополните баланс через этого бота\n"
+        "2. Перейдите в игровой чат\n"
+        "3. Кидайте эмодзи-кости (🎲, 🎯, 🎳, 🏀, 🎰)\n"
+        "4. Автоматически получайте выигрыши\n\n"
+        "💰 <b>Коэффициенты:</b>\n"
+        "• 🎲 Кубик (x2) - выпало 4-6\n"
+        "• 🏀 Баскетбол (x2.5) - выпало 4-5\n"
+        "• 🎯 Дартс (x2.5) - попал в центр\n"
+        "• 🎳 Боулинг (x5) - страйк (6)\n"
+        "• 🎰 Слоты (x50) - джекпот (64)\n\n"
+        "Выберите действие:",
+        reply_markup=main_menu_kb()
+    )
 
 @dp.callback_query(F.data == "main_menu")
 async def cb_main_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     user = get_user(callback.from_user.id)
-    await send_styled_message(callback, f"Главное меню\n💰 Баланс: {format_balance(user['balance'])}", main_menu_kb())
+    await callback.message.edit_text(
+        "🏠 <b>Главное меню</b>\n\n"
+        f"💰 Ваш баланс: {format_balance(user['balance'])}\n\n"
+        "Выберите действие:",
+        reply_markup=main_menu_kb()
+    )
 
 @dp.callback_query(F.data == "check_balance")
-async def cb_bal(callback: CallbackQuery):
+async def cb_balance(callback: CallbackQuery):
     user = get_user(callback.from_user.id)
-    await callback.answer(f"Ваш баланс: {user['balance']:.2f}$", show_alert=True)
+    await callback.answer(f"💰 Ваш баланс: {user['balance']:.2f}$", show_alert=True)
 
-# Логика пополнения - ИСПРАВЛЕННАЯ ВЕРСИЯ
+# --- ПОПОЛНЕНИЕ ---
 @dp.callback_query(F.data == "deposit_start")
-async def dep_start(callback: CallbackQuery, state: FSMContext):
+async def dep_start(callback: CallbackQuery):
     if crypto is None:
         await callback.answer("❌ Сервис оплаты временно недоступен", show_alert=True)
         return
+    await callback.message.edit_text(
+        "💳 <b>Выберите способ пополнения:</b>",
+        reply_markup=deposit_methods_kb()
+    )
+
+@dp.callback_query(F.data == "deposit_crypto")
+async def dep_crypto(callback: CallbackQuery, state: FSMContext):
     await state.set_state(BotStates.waiting_for_deposit_amount)
-    await send_styled_message(callback, 
-        "💵 <b>Введите сумму пополнения</b>\n\n"
-        "Минимальная сумма: <b>0.1 $</b>\n"
+    await callback.message.edit_text(
+        "💎 <b>Пополнение через CryptoBot</b>\n\n"
+        "Введите сумму пополнения в $ (USDT)\n"
+        "Минимальная сумма: <b>1 $</b>\n"
         "Максимальная сумма: <b>10000 $</b>\n\n"
-        "Примеры ввода:\n"
-        "• <code>10</code>\n"
-        "• <code>5.50</code>\n"
-        "• <code>2,75</code>", 
-        cancel_deposit_kb()
+        "Примеры: <code>10</code>, <code>50.5</code>, <code>100</code>",
+        reply_markup=cancel_kb()
     )
 
 @dp.message(BotStates.waiting_for_deposit_amount)
-async def dep_proc(message: Message, state: FSMContext):
-    if crypto is None:
-        await message.answer("❌ Сервис оплаты временно недоступен")
-        return
-    
+async def dep_amount(message: Message, state: FSMContext):
     amount = extract_number(message.text)
     
     if amount is None:
-        await message.answer("❌ <b>Неверный формат!</b>\n\nПожалуйста, введите число.\nПример: <code>10</code> или <code>5.50</code>")
+        await message.answer("❌ Неверный формат! Введите число:", reply_markup=cancel_kb())
         return
     
-    if amount < 0.1:
-        await message.answer(f"❌ <b>Сумма слишком мала!</b>\n\nМинимальная сумма пополнения: <b>0.1 $</b>")
+    if amount < 1:
+        await message.answer("❌ Минимальная сумма: 1$", reply_markup=cancel_kb())
         return
     
     if amount > 10000:
-        await message.answer(f"❌ <b>Сумма слишком велика!</b>\n\nМаксимальная сумма пополнения: <b>10000 $</b>")
+        await message.answer("❌ Максимальная сумма: 10000$", reply_markup=cancel_kb())
         return
     
     try:
         user = get_user(message.from_user.id)
-        
-        # Создаем счет - ПРАВИЛЬНЫЙ СПОСОБ
         invoice = await crypto.create_invoice(asset='USDT', amount=amount)
         
-        # Получаем ссылку на оплату ПРАВИЛЬНЫМ способом
-        # Проверяем доступные атрибуты
-        logger.info(f"Инвойс создан: {invoice}")
-        logger.info(f"Атрибуты инвойса: {dir(invoice)}")
-        
-        # Попробуем разные варианты получения ссылки
+        # Получаем ссылку на оплату
         pay_url = None
-        
-        # Вариант 1: проверяем атрибут 'url'
         if hasattr(invoice, 'url'):
             pay_url = invoice.url
-        
-        # Вариант 2: проверяем атрибут 'pay_url' (старый вариант)
         elif hasattr(invoice, 'pay_url'):
             pay_url = invoice.pay_url
-        
-        # Вариант 3: если есть bot_invoice_url (для ссылки на бота)
         elif hasattr(invoice, 'bot_invoice_url'):
             pay_url = invoice.bot_invoice_url
         
-        # Вариант 4: получаем через bot_url (если есть)
-        elif hasattr(invoice, 'bot_url'):
-            pay_url = invoice.bot_url
-        
-        # Вариант 5: смотрим в invoice.data если это словарь
-        elif hasattr(invoice, 'data') and isinstance(invoice.data, dict):
-            if 'url' in invoice.data:
-                pay_url = invoice.data['url']
-            elif 'pay_url' in invoice.data:
-                pay_url = invoice.data['pay_url']
-        
-        if not pay_url:
-            # Если не нашли ссылку, создаем через API CryptoBot напрямую
-            logger.warning("Не найдена ссылка в объекте инвойса")
-            await message.answer(
-                f"✅ <b>Счет создан!</b>\n\n"
-                f"💳 Сумма: <b>{amount:.2f} $</b>\n"
-                f"📝 ID счета: <code>{invoice.invoice_id}</code>\n\n"
-                f"Для оплаты перейдите в @CryptoBot и введите команду:\n"
-                f"<code>/pay {invoice.invoice_id}</code>"
-            )
-            user['last_invoice_id'] = invoice.invoice_id
-            await state.clear()
-            return
-        
-        # Сохраняем ID счета
         user['last_invoice_id'] = invoice.invoice_id
         
         await message.answer(
             f"✅ <b>Счет создан!</b>\n\n"
             f"💳 Сумма: <b>{amount:.2f} $</b>\n"
-            f"📝 ID счета: <code>{invoice.invoice_id}</code>\n\n"
-            f"Нажмите на кнопку ниже для оплаты:",
-            reply_markup=check_payment_kb(pay_url)
+            f"📝 ID: <code>{invoice.invoice_id}</code>\n"
+            f"⏳ Счет действует 15 минут\n\n"
+            f"Нажмите кнопку для оплаты:",
+            reply_markup=check_payment_kb(pay_url) if pay_url else cancel_kb()
         )
         await state.clear()
         
     except Exception as e:
-        logger.error(f"Ошибка при создании счета: {e}")
+        logger.error(f"Ошибка создания счета: {e}")
         await message.answer(
-            f"❌ <b>Ошибка при создании счета:</b>\n\n"
-            f"<code>{str(e)}</code>\n\n"
-            f"Попробуйте еще раз или обратитесь в поддержку."
+            "❌ Ошибка при создании счета\n"
+            "Попробуйте позже или обратитесь в поддержку",
+            reply_markup=cancel_kb()
         )
 
 @dp.callback_query(F.data == "check_deposit_status")
-async def check_dep(callback: CallbackQuery):
+async def check_deposit(callback: CallbackQuery):
     if crypto is None:
-        await callback.answer("❌ Сервис оплаты временно недоступен", show_alert=True)
+        await callback.answer("❌ Сервис недоступен", show_alert=True)
         return
     
     user = get_user(callback.from_user.id)
     inv_id = user.get('last_invoice_id')
     
     if not inv_id:
-        await callback.answer("❌ Не найден активный счет для проверки", show_alert=True)
+        await callback.answer("❌ Нет активных счетов", show_alert=True)
         return
     
     try:
@@ -256,7 +254,7 @@ async def check_dep(callback: CallbackQuery):
         
         invoice = invoices[0]
         
-        # Проверяем статус счета
+        # Определяем статус
         if hasattr(invoice, 'status'):
             status = invoice.status
         elif hasattr(invoice, 'paid'):
@@ -267,11 +265,15 @@ async def check_dep(callback: CallbackQuery):
         if status == 'paid':
             amt = float(invoice.amount)
             user['balance'] += amt
+            user['total_deposit'] += amt
             user['last_invoice_id'] = None
-            await callback.answer(f"✅ Успешно! Зачислено {amt:.2f}$", show_alert=True)
+            add_transaction(callback.from_user.id, 'deposit', amt)
+            
+            await callback.answer(f"✅ Зачислено {amt:.2f}$", show_alert=True)
             await cb_main_menu(callback, None)
+            
         elif status == 'active':
-            await callback.answer("⏳ Счет ожидает оплаты", show_alert=True)
+            await callback.answer("⏳ Ожидает оплаты", show_alert=True)
         elif status == 'expired':
             await callback.answer("❌ Счет истек", show_alert=True)
             user['last_invoice_id'] = None
@@ -279,83 +281,351 @@ async def check_dep(callback: CallbackQuery):
             await callback.answer(f"Статус: {status}", show_alert=True)
             
     except Exception as e:
-        logger.error(f"Ошибка при проверке счета: {e}")
-        await callback.answer("❌ Ошибка при проверке статуса", show_alert=True)
+        logger.error(f"Ошибка проверки: {e}")
+        await callback.answer("❌ Ошибка проверки", show_alert=True)
 
-# Обработчики игр (без изменений)
-@dp.callback_query(F.data == "menu_darts")
-async def d_menu(callback: CallbackQuery):
-    await send_styled_message(callback, "🎯 <b>Дартс</b>\nВыберите, куда попадет дротик:", darts_menu_kb())
+# --- ВЫВОД ---
+@dp.callback_query(F.data == "withdraw_start")
+async def withdraw_start(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if user['balance'] < 1:
+        await callback.answer("❌ Минимальная сумма вывода: 1$", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "💸 <b>Вывод средств</b>\n\n"
+        f"💰 Доступно: {format_balance(user['balance'])}\n"
+        f"💳 Минимальный вывод: <b>1 $</b>\n\n"
+        "Выберите способ вывода:",
+        reply_markup=withdraw_methods_kb()
+    )
 
-@dp.callback_query(F.data.startswith("bets_darts_"))
-async def d_bet(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(game_mode="darts", bet_target=callback.data.split("_")[2])
-    await state.set_state(BotStates.waiting_for_bet_amount)
-    await callback.message.answer("💸 Введите сумму вашей ставки:")
+@dp.callback_query(F.data == "withdraw_usdt")
+async def withdraw_usdt(callback: CallbackQuery, state: FSMContext):
+    user = get_user(callback.from_user.id)
+    if user['balance'] < 1:
+        await callback.answer("❌ Недостаточно средств", show_alert=True)
+        return
+    
+    await state.set_state(BotStates.waiting_for_withdraw_amount)
+    await callback.message.edit_text(
+        "💎 <b>Вывод USDT (TRC20)</b>\n\n"
+        f"💰 Ваш баланс: {format_balance(user['balance'])}\n"
+        f"💳 Минимальный вывод: <b>1 $</b>\n"
+        f"📝 Комиссия: <b>0.5%</b>\n\n"
+        "Введите сумму для вывода:",
+        reply_markup=cancel_kb()
+    )
 
-@dp.callback_query(F.data.startswith("sel_"))
-async def s_game(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(game_mode=callback.data.split("_")[1], bet_target="any")
-    await state.set_state(BotStates.waiting_for_bet_amount)
-    await callback.message.answer("💸 Введите сумму вашей ставки:")
+@dp.message(BotStates.waiting_for_withdraw_amount)
+async def withdraw_amount(message: Message, state: FSMContext):
+    amount = extract_number(message.text)
+    user = get_user(message.from_user.id)
+    
+    if amount is None:
+        await message.answer("❌ Неверный формат! Введите число:", reply_markup=cancel_kb())
+        return
+    
+    if amount < 1:
+        await message.answer("❌ Минимальная сумма: 1$", reply_markup=cancel_kb())
+        return
+    
+    if amount > user['balance']:
+        await message.answer(f"❌ Недостаточно средств! Баланс: {user['balance']:.2f}$", reply_markup=cancel_kb())
+        return
+    
+    # Рассчитываем с комиссией
+    fee = amount * 0.005  # 0.5%
+    final_amount = amount - fee
+    
+    await state.update_data(withdraw_amount=amount, final_amount=final_amount)
+    await state.set_state(BotStates.waiting_for_withdraw_address)
+    
+    await message.answer(
+        f"📊 <b>Детали вывода</b>\n\n"
+        f"💳 Сумма: {format_balance(amount)}\n"
+        f"📝 Комиссия (0.5%): {fee:.2f} $\n"
+        f"💰 К получению: {format_balance(final_amount)}\n\n"
+        "Введите адрес кошелька USDT (TRC20):",
+        reply_markup=cancel_kb()
+    )
 
-@dp.message(BotStates.waiting_for_bet_amount)
-async def game_proc(message: Message, state: FSMContext):
-    try:
-        bet = extract_number(message.text)
-        
-        if bet is None:
-            await message.answer("⚠️ Пожалуйста, введите числовое значение ставки.")
-            return
-            
-        user = get_user(message.from_user.id)
-        
-        if bet > user['balance']:
-            await message.answer(f"❌ Недостаточно средств!\nВаш баланс: {user['balance']:.2f}$")
-            return
-            
-        if bet < 0.1:
-            await message.answer(f"❌ Минимальная ставка: 0.1$")
-            return
-        
-        user['balance'] -= bet
-        data = await state.get_data()
-        mode, target = data['game_mode'], data['bet_target']
-        
-        emoji_choice = {"dice":"🎲","basketball":"🏀","darts":"🎯","bowling":"🎳","slot":"🎰"}.get(mode, "🎲")
-        msg = await message.answer_dice(emoji=emoji_choice)
-        await asyncio.sleep(4)
-        val = msg.dice.value
-        
-        win, coeff = False, 0.0
-        if mode == "darts":
-            if target=="miss" and val==1: win, coeff = True, 2.5
-            elif target=="white" and val in [2,4]: win, coeff = True, 1.7
-            elif target=="red" and val in [3,5]: win, coeff = True, 1.7
-            elif target=="bullseye" and val==6: win, coeff = True, 2.5
-        elif mode=="dice" and val > 3: win, coeff = True, 2.0
-        elif mode=="basketball" and val in [4,5]: win, coeff = True, 2.5
-        elif mode=="bowling" and val==6: win, coeff = True, 5.0
-        elif mode=="slot" and val==64: win, coeff = True, 50.0
+@dp.message(BotStates.waiting_for_withdraw_address)
+async def withdraw_address(message: Message, state: FSMContext):
+    address = message.text.strip()
+    
+    # Простая валидация адреса TRC20
+    if not re.match(r'^T[A-Za-z0-9]{33}$', address):
+        await message.answer(
+            "❌ Неверный формат адреса!\n"
+            "Введите корректный адрес USDT (TRC20), начинающийся с 'T'",
+            reply_markup=cancel_kb()
+        )
+        return
+    
+    data = await state.get_data()
+    amount = data['withdraw_amount']
+    final_amount = data['final_amount']
+    user = get_user(message.from_user.id)
+    
+    # Списание средств
+    user['balance'] -= amount
+    user['total_withdraw'] += amount
+    add_transaction(message.from_user.id, 'withdraw', -amount, 
+                   status="pending", 
+                   details=f"Адрес: {address}")
+    
+    # Здесь должна быть интеграция с платежной системой
+    # Пока имитируем вывод
+    
+    await message.answer(
+        f"✅ <b>Заявка на вывод создана!</b>\n\n"
+        f"💳 Сумма: {format_balance(amount)}\n"
+        f"💰 К получению: {format_balance(final_amount)}\n"
+        f"📝 Адрес: <code>{address}</code>\n"
+        f"⏳ Статус: <b>В обработке</b>\n\n"
+        f"Заявка будет обработана в течение 24 часов.\n"
+        f"ID транзакции: <code>{len(transactions_db)}</code>",
+        reply_markup=main_menu_kb()
+    )
+    
+    # Уведомление администратору (замените на ваш ID)
+    admin_id = None  # Укажите ваш ID
+    if admin_id:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"🚨 <b>НОВАЯ ЗАЯВКА НА ВЫВОД</b>\n\n"
+                f"👤 Пользователь: {user.get('username', message.from_user.id)}\n"
+                f"💳 Сумма: {amount:.2f}$\n"
+                f"💰 К выплате: {final_amount:.2f}$\n"
+                f"📝 Адрес: <code>{address}</code>\n"
+                f"🆔 ID транзакции: {len(transactions_db)}"
+            )
+        except:
+            pass
+    
+    await state.clear()
 
+# --- ПРОФИЛЬ ---
+@dp.callback_query(F.data == "profile")
+async def profile(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    
+    win_rate = 0
+    if user['games_played'] > 0:
+        win_rate = (user['games_won'] / user['games_played']) * 100
+    
+    await callback.message.edit_text(
+        f"👤 <b>Профиль игрока</b>\n\n"
+        f"🆔 ID: <code>{callback.from_user.id}</code>\n"
+        f"📅 Регистрация: {user['registration_date']}\n\n"
+        f"💰 Баланс: {format_balance(user['balance'])}\n"
+        f"💳 Всего пополнено: {format_balance(user['total_deposit'])}\n"
+        f"💸 Всего выведено: {format_balance(user['total_withdraw'])}\n\n"
+        f"🎮 Статистика игр:\n"
+        f"• Сыграно игр: {user['games_played']}\n"
+        f"• Побед: {user['games_won']}\n"
+        f"• Процент побед: {win_rate:.1f}%\n\n"
+        f"🎲 Играйте в нашем игровом чате!",
+        reply_markup=main_menu_kb()
+    )
+
+# --- ИСТОРИЯ ---
+@dp.callback_query(F.data == "history")
+async def history(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_transactions = [t for t in transactions_db if t['user_id'] == user_id][-10:]  # Последние 10
+    
+    if not user_transactions:
+        await callback.message.edit_text(
+            "📋 <b>История операций</b>\n\n"
+            "У вас еще нет операций.",
+            reply_markup=main_menu_kb()
+        )
+        return
+    
+    history_text = "📋 <b>История операций</b>\n\n"
+    
+    for tx in reversed(user_transactions):
+        emoji = ""
+        if tx['type'] == 'deposit':
+            emoji = "💳"
+        elif tx['type'] == 'withdraw':
+            emoji = "💸"
+        elif tx['type'] == 'win':
+            emoji = "🎉"
+        elif tx['type'] == 'loss':
+            emoji = "😢"
+        
+        amount_sign = "+" if tx['amount'] > 0 else ""
+        history_text += f"{emoji} {tx['timestamp']} - {amount_sign}{tx['amount']:.2f}$ ({tx['type']})\n"
+    
+    await callback.message.edit_text(
+        history_text,
+        reply_markup=main_menu_kb()
+    )
+
+# --- ИНСТРУКЦИЯ ---
+@dp.callback_query(F.data == "instructions")
+async def instructions(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "📚 <b>Инструкция по использованию</b>\n\n"
+        "🎮 <b>Как начать играть:</b>\n"
+        "1. Пополните баланс через раздел '💳 Пополнить'\n"
+        "2. Получите ссылку на игровой чат у поддержки\n"
+        "3. Войдите в игровой чат\n"
+        "4. Кидайте эмодзи-кости в чат\n\n"
+        
+        "🎲 <b>Правила игр:</b>\n"
+        "• 🎲 <b>Кубик (x2)</b> - победа если выпало 4-6\n"
+        "• 🏀 <b>Баскетбол (x2.5)</b> - победа если выпало 4-5\n"
+        "• 🎯 <b>Дартс (x2.5)</b> - победа если попал в центр (6)\n"
+        "• 🎳 <b>Боулинг (x5)</b> - победа если страйк (6)\n"
+        "• 🎰 <b>Слоты (x50)</b> - победа если джекпот (64)\n\n"
+        
+        "💸 <b>Вывод средств:</b>\n"
+        "• Минимальный вывод: 1$\n"
+        "• Комиссия: 0.5%\n"
+        "• Время обработки: до 24 часов\n\n"
+        
+        "📞 <b>Поддержка:</b>\n"
+        "По всем вопросам обращайтесь в раздел '👨‍💻 Поддержка'",
+        reply_markup=main_menu_kb()
+    )
+
+# --- ПОДДЕРЖКА ---
+@dp.callback_query(F.data == "support")
+async def support(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "👨‍💻 <b>Служба поддержки</b>\n\n"
+        "📞 <b>Связь с администратором:</b>\n"
+        "• Технические проблемы\n"
+        "• Вопросы по выплатам\n"
+        "• Получение ссылки на игровой чат\n"
+        "• Предложения и жалобы\n\n"
+        "✉️ <b>Написать в поддержку:</b>\n"
+        "• @username_admin (замените на реальный)\n\n"
+        "⏰ <b>Время работы:</b>\n"
+        "Круглосуточно, 7 дней в неделю\n\n"
+        "⚠️ <b>Важно:</b>\n"
+        "Администратор никогда не просит пароли или приватные ключи!",
+        reply_markup=main_menu_kb()
+    )
+
+# --- ОБРАБОТКА ИГР В ЧАТЕ ---
+async def process_game_in_chat(message: Message):
+    """Обработка игр в игровом чате"""
+    if not GAME_CHAT_ID or message.chat.id != GAME_CHAT_ID:
+        return
+    
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    
+    # Определяем минимальную ставку
+    bet_amount = 0.1  # Минимальная ставка
+    
+    if user['balance'] < bet_amount:
+        await message.reply(f"❌ Недостаточно средств! Минимальная ставка: {bet_amount}$. Пополните баланс.")
+        return
+    
+    # Вычитаем ставку
+    user['balance'] -= bet_amount
+    user['games_played'] += 1
+    add_transaction(user_id, 'loss', -bet_amount, details=f"Ставка в игре")
+    
+    # Ждем результат кубика (Telegram сам обрабатывает)
+    await asyncio.sleep(4)
+    
+    # Получаем результат из сообщения с кубиком
+    if message.dice:
+        dice_value = message.dice.value
+        emoji = message.dice.emoji
+        
+        win = False
+        multiplier = 1.0
+        
+        # Проверяем выигрыш по эмодзи
+        if emoji == "🎲":  # Кубик
+            if dice_value > 3:  # 4, 5, 6
+                win = True
+                multiplier = 2.0
+        elif emoji == "🏀":  # Баскетбол
+            if dice_value in [4, 5]:
+                win = True
+                multiplier = 2.5
+        elif emoji == "🎯":  # Дартс
+            if dice_value == 6:  # Центр
+                win = True
+                multiplier = 2.5
+        elif emoji == "🎳":  # Боулинг
+            if dice_value == 6:  # Страйк
+                win = True
+                multiplier = 5.0
+        elif emoji == "🎰":  # Слоты
+            if dice_value == 64:  # Джекпот
+                win = True
+                multiplier = 50.0
+        
         if win:
-            prize = bet * coeff
-            user['balance'] += prize
-            await message.answer(f"🎉 <b>ПОБЕДА!</b>\nВыигрыш: +{prize:.2f}$")
-        else:
-            await message.answer(f"😢 <b>Проигрыш.</b>\nВыпало: {val}")
+            win_amount = bet_amount * multiplier
+            user['balance'] += win_amount
+            user['games_won'] += 1
+            add_transaction(user_id, 'win', win_amount, details=f"Выигрыш {multiplier}x")
             
-        await state.clear()
-        await asyncio.sleep(1)
-        await cmd_start(message, state)
-    except Exception as e:
-        logger.error(f"Ошибка в игре: {e}")
-        await message.answer("⚠️ Произошла ошибка. Попробуйте еще раз.")
+            # Отправляем сообщение о выигрыше
+            await message.reply(
+                f"🎉 <b>ПОБЕДА!</b>\n\n"
+                f"👤 Игрок: {message.from_user.first_name}\n"
+                f"🎲 Выпало: {dice_value}\n"
+                f"💰 Коэффициент: x{multiplier}\n"
+                f"💵 Выигрыш: +{win_amount:.2f}$\n"
+                f"🏦 Новый баланс: {user['balance']:.2f}$"
+            )
+        else:
+            await message.reply(
+                f"😢 <b>ПРОИГРЫШ</b>\n\n"
+                f"👤 Игрок: {message.from_user.first_name}\n"
+                f"🎲 Выпало: {dice_value}\n"
+                f"💸 Потеряно: {bet_amount:.2f}$\n"
+                f"🏦 Остаток: {user['balance']:.2f}$"
+            )
 
-# Запуск
+# Регистрируем обработчик для кубиков в чатах
+@dp.message(F.dice)
+async def handle_dice(message: Message):
+    await process_game_in_chat(message)
+
+# --- АДМИН КОМАНДЫ ---
+@dp.message(Command("admin"))
+async def admin_panel(message: Message):
+    # Проверяем, является ли пользователь администратором
+    admin_ids = []  # Добавьте ID администраторов
+    
+    if message.from_user.id not in admin_ids:
+        return
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
+         InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton(text="💸 Выплаты", callback_data="admin_payouts"),
+         InlineKeyboardButton(text="📊 Балансы", callback_data="admin_balances")]
+    ])
+    
+    await message.answer("🛠 <b>Панель администратора</b>", reply_markup=keyboard)
+
+# --- ЗАПУСК ---
 async def main():
-    print("--- БОТ ЗАПУЩЕН ---")
-    print(f"Crypto токен: {CRYPTO_BOT_TOKEN[:10]}...")
+    print("🎰 FRK Casino Bot запущен!")
+    print(f"🤖 Bot ID: {BOT_TOKEN[:10]}...")
+    print(f"💰 Crypto токен: {CRYPTO_BOT_TOKEN[:10]}...")
+    print("⚙️ Бот готов к работе!")
+    
+    if GAME_CHAT_ID:
+        print(f"🎮 Игровой чат: {GAME_CHAT_ID}")
+    else:
+        print("⚠️ Игровой чат не указан! Укажите GAME_CHAT_ID в коде")
+    
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
