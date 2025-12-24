@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
@@ -40,6 +41,19 @@ class BotStates(StatesGroup):
 def format_balance(amount):
     return f"<b>{amount:.2f} $</b>"
 
+# Функция для извлечения числа из текста
+def extract_number(text):
+    # Ищем числа с точками или запятыми в качестве разделителей
+    match = re.search(r'(\d+[.,]?\d*)', text)
+    if match:
+        # Заменяем запятую на точку для корректного преобразования
+        number_str = match.group(1).replace(',', '.')
+        try:
+            return float(number_str)
+        except ValueError:
+            return None
+    return None
+
 # Функция для стилизации сообщений (без GIF)
 async def send_styled_message(target, text, reply_markup=None):
     formatted_text = f"<blockquote>👾 <b>Emoji Casino</b> ❞</blockquote>\n\n{text}"
@@ -59,7 +73,7 @@ def main_menu_kb():
         [InlineKeyboardButton(text="🎲 Кубик (x2)", callback_data="sel_dice"),
          InlineKeyboardButton(text="🏀 Баскет (x2.5)", callback_data="sel_basketball")],
         [InlineKeyboardButton(text="🎯 Дартс (Меню)", callback_data="menu_darts"),
-         InlineKeyboardButton(text=" bowling🎳 (x5)", callback_data="sel_bowling")],
+         InlineKeyboardButton(text="🎳 Боулинг (x5)", callback_data="sel_bowling")],
         [InlineKeyboardButton(text="🎰 Слоты (x50)", callback_data="sel_slot")],
         [InlineKeyboardButton(text="💳 Пополнить", callback_data="deposit_start"),
          InlineKeyboardButton(text="💰 Баланс", callback_data="check_balance")]
@@ -78,6 +92,11 @@ def check_payment_kb(url):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔗 Оплатить через CryptoBot", url=url)],
         [InlineKeyboardButton(text="✅ Проверить оплату", callback_data="check_deposit_status")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="main_menu")]
+    ])
+
+def cancel_deposit_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="main_menu")]
     ])
 
@@ -104,36 +123,82 @@ async def cb_bal(callback: CallbackQuery):
 @dp.callback_query(F.data == "deposit_start")
 async def dep_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(BotStates.waiting_for_deposit_amount)
-    await send_styled_message(callback, "Введите сумму пополнения в $ (минимум 0.1):")
+    await send_styled_message(callback, "💵 <b>Введите сумму пополнения</b>\n\nМинимальная сумма: <b>0.1 $</b>\n\nПримеры ввода:\n• <code>10</code>\n• <code>5.50</code>\n• <code>2,75</code>", cancel_deposit_kb())
 
 @dp.message(BotStates.waiting_for_deposit_amount)
 async def dep_proc(message: Message, state: FSMContext):
+    # Пытаемся извлечь число из текста
+    amount = extract_number(message.text)
+    
+    if amount is None:
+        await message.answer("❌ <b>Неверный формат!</b>\n\nПожалуйста, введите число.\nПример: <code>10</code> или <code>5.50</code>")
+        return
+    
+    # Проверяем минимальную сумму
+    if amount < 0.1:
+        await message.answer(f"❌ <b>Сумма слишком мала!</b>\n\nМинимальная сумма пополнения: <b>0.1 $</b>")
+        return
+    
+    # Проверяем максимальную сумму (опционально)
+    if amount > 10000:
+        await message.answer(f"❌ <b>Сумма слишком велика!</b>\n\nМаксимальная сумма пополнения: <b>10000 $</b>")
+        return
+    
     try:
-        amount = float(message.text.replace(',', '.'))
+        user = get_user(message.from_user.id)
         invoice = await crypto.create_invoice(asset='USDT', amount=amount)
-        get_user(message.from_user.id)['last_invoice_id'] = invoice.invoice_id
-        await message.answer(f"Счет на {amount} USDT создан! Оплатите его по кнопке ниже:", 
-                             reply_markup=check_payment_kb(invoice.pay_url))
+        user['last_invoice_id'] = invoice.invoice_id
+        
+        await message.answer(
+            f"✅ <b>Счет создан!</b>\n\n"
+            f"💳 Сумма: <b>{amount:.2f} $</b>\n"
+            f"📝 ID счета: <code>{invoice.invoice_id}</code>\n\n"
+            f"Нажмите на кнопку ниже для оплаты:",
+            reply_markup=check_payment_kb(invoice.pay_url)
+        )
         await state.clear()
-    except:
-        await message.answer("⚠️ Ошибка. Введите число (например: 5).")
+    except Exception as e:
+        logging.error(f"Ошибка при создании счета: {e}")
+        await message.answer("❌ <b>Ошибка при создании счета.</b>\n\nПопробуйте еще раз или обратитесь в поддержку.")
 
 @dp.callback_query(F.data == "check_deposit_status")
 async def check_dep(callback: CallbackQuery):
     user = get_user(callback.from_user.id)
     inv_id = user.get('last_invoice_id')
-    if inv_id:
+    
+    if not inv_id:
+        await callback.answer("❌ Не найден активный счет для проверки", show_alert=True)
+        return
+    
+    try:
         invoices = await crypto.get_invoices(invoice_ids=[inv_id])
-        if invoices and invoices[0].status == 'paid':
-            amt = float(invoices[0].amount)
+        
+        if not invoices:
+            await callback.answer("❌ Счет не найден", show_alert=True)
+            return
+        
+        invoice = invoices[0]
+        
+        if invoice.status == 'paid':
+            amt = float(invoice.amount)
             user['balance'] += amt
             user['last_invoice_id'] = None
-            await callback.answer(f"✅ Успешно! Зачислено {amt}$", show_alert=True)
+            await callback.answer(f"✅ Успешно! Зачислено {amt:.2f}$", show_alert=True)
             await cb_main_menu(callback, None)
-            return
-    await callback.answer("⏳ Оплата не найдена или еще обрабатывается.")
+        elif invoice.status == 'active':
+            await callback.answer("⏳ Счет ожидает оплаты", show_alert=True)
+        elif invoice.status == 'expired':
+            await callback.answer("❌ Счет истек", show_alert=True)
+            user['last_invoice_id'] = None
+        else:
+            await callback.answer(f"Статус: {invoice.status}", show_alert=True)
+            
+    except Exception as e:
+        logging.error(f"Ошибка при проверке счета: {e}")
+        await callback.answer("❌ Ошибка при проверке статуса", show_alert=True)
 
-# Логика игр
+# Остальные обработчики игр остаются без изменений...
+
 @dp.callback_query(F.data == "menu_darts")
 async def d_menu(callback: CallbackQuery):
     await send_styled_message(callback, "🎯 <b>Дартс</b>\nВыберите, куда попадет дротик:", darts_menu_kb())
@@ -153,10 +218,21 @@ async def s_game(callback: CallbackQuery, state: FSMContext):
 @dp.message(BotStates.waiting_for_bet_amount)
 async def game_proc(message: Message, state: FSMContext):
     try:
-        bet = float(message.text.replace(',', '.'))
+        # Используем ту же функцию для извлечения числа
+        bet = extract_number(message.text)
+        
+        if bet is None:
+            await message.answer("⚠️ Пожалуйста, введите числовое значение ставки.")
+            return
+            
         user = get_user(message.from_user.id)
-        if bet > user['balance'] or bet < 0.1:
-            await message.answer(f"❌ Ошибка. Баланс: {user['balance']:.2f}$. Минимум: 0.1$")
+        
+        if bet > user['balance']:
+            await message.answer(f"❌ Недостаточно средств!\nВаш баланс: {user['balance']:.2f}$")
+            return
+            
+        if bet < 0.1:
+            await message.answer(f"❌ Минимальная ставка: 0.1$")
             return
         
         user['balance'] -= bet
@@ -190,8 +266,9 @@ async def game_proc(message: Message, state: FSMContext):
         await asyncio.sleep(1)
         # Возврат в начало через вызов команды старт
         await cmd_start(message, state)
-    except:
-        await message.answer("⚠️ Введите числовое значение.")
+    except Exception as e:
+        logging.error(f"Ошибка в игре: {e}")
+        await message.answer("⚠️ Произошла ошибка. Попробуйте еще раз.")
 
 # Запуск
 async def main():
