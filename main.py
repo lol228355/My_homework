@@ -14,7 +14,7 @@ from datetime import datetime
 # --- ⚙️ КОНФИГУРАЦИЯ ---
 BOT_TOKEN = "8315937988:AAHaKhMNy0t-uXQjSumvkDk3nf2vyTHf63U"
 CRYPTO_BOT_TOKEN = "505642:AATEFAUIQ3OE9ihgalDaLzhI4u7uH2CY0X5"
-GAME_CHAT_ID = None  # Укажите ID игрового чата здесь
+GAME_CHAT_ID = -1003582415216  # Укажите ID игрового чата здесь
 
 # Курс валюты (1$ = ~83₽, 100₽ = ~1.2$)
 USD_TO_RUB_RATE = 83.0
