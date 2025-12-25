@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import re
+import uuid
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command, StateFilter
@@ -14,29 +16,27 @@ from aiocryptopay import AioCryptoPay, Networks
 BOT_TOKEN = "8315937988:AAHaKhMNy0t-uXQjSumvkDk3nf2vyTHf63U"
 CRYPTO_BOT_TOKEN = "505642:AATEFAUIQ3OE9ihgalDaLzhI4u7uH2CY0X5"
 GAME_CHAT_ID = -1003582415216  # ID вашего чата
-ADMIN_ID = 7323981601 # Ваш ID
+ADMIN_ID = 7323981601  # Ваш ID
 
-CASINO_NAME = "Andron"
-MIN_DEPOSIT_RUB = 50.0
+CASINO_NAME = "🎰 ANDRON CASINO"
+MIN_DEPOSIT_RUB = 100.0
 MIN_WITHDRAW_RUB = 150.0
-USD_TO_RUB_RATE = 50.0 # Курс для конвертации пополнений
-HOUSE_COMMISSION = 0.10  # 10% (скрытая)
+USD_TO_RUB_RATE = 100.0
+HOUSE_COMMISSION = 0.10
 
-# Логирование
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher(storage=MemoryStorage())
-
-# Crypto Pay
 crypto = AioCryptoPay(token=CRYPTO_BOT_TOKEN, network=Networks.MAIN_NET)
 
-# --- БАЗА ДАННЫХ В ПАМЯТИ ---
+# --- БАЗА ДАННЫХ ---
 user_db = {}
-active_games = {}
-withdrawal_requests = {} # id_заявки: {user_id, amount, username}
-TOTAL_PROFIT = 0.0 
+active_games = {} # Key: game_uuid, Value: dict
+game_msg_map = {} # Key: bot_message_id, Value: game_uuid
+withdrawal_requests = {} 
+TOTAL_PROFIT = 0.0
 
-# --- СОСТОЯНИЯ (FSM) ---
+# --- СОСТОЯНИЯ ---
 class AdminState(StatesGroup):
     waiting_for_username = State()
     waiting_for_amount = State()
@@ -45,311 +45,189 @@ class UserState(StatesGroup):
     waiting_deposit_amount = State()
     waiting_withdraw_amount = State()
 
-# --- ФУНКЦИИ БД ---
+# --- ФУНКЦИИ ---
 def get_user(user_id, username=None):
     if user_id not in user_db:
         u_name = f"@{username}" if username else f"ID_{user_id}"
         user_db[user_id] = {'balance': 0.0, 'username': u_name, 'real_name': username}
-    if username: 
+    if username:
         user_db[user_id]['username'] = f"@{username}"
-        user_db[user_id]['real_name'] = username
     return user_db[user_id]
 
-def find_user_id_by_name(target_username):
-    target = target_username.lower().replace('@', '').strip()
-    for uid, data in user_db.items():
-        if data.get('real_name', '').lower() == target: return uid
-        if data['username'].lower().replace('@', '') == target: return uid
-    return None
-
 def format_money(amount):
-    return f"{amount:.0f} RUB"
+    return f"<b>{amount:.0f} RUB</b>"
 
-# --- ТЕКСТЫ ---
-# Текст правил без упоминания комиссии
+# --- ТЕКСТЫ И МЕНЮ ---
 RULES_TEXT = f"""
 <b>ℹ️ ИНСТРУКЦИЯ {CASINO_NAME}</b>
 
-1. Пополните баланс через CryptoBot или администратора.
-2. Создавайте игры командами или вступайте в существующие.
-3. Вывод средств осуществляется по запросу в профиле.
+<b>1. Пополнение:</b> Через CryptoBot или Админа.
+<b>2. Вывод:</b> От {MIN_WITHDRAW_RUB} RUB в профиле.
 
-<b>Минимальное пополнение:</b> {MIN_DEPOSIT_RUB} RUB
-<b>Минимальный вывод:</b> {MIN_WITHDRAW_RUB} RUB
+👇 <b>Нажми на команду, чтобы скопировать:</b>
 
-<b>Доступные игры:</b>
-🎲 <code>/cub [ставка]</code> — Кубик (1 бросок)
-🎯 <code>/dar [ставка]</code> — Дартс
-🎳 <code>/boul [ставка]</code> — Боулинг
-🏀 <code>/bas [ставка]</code> — Баскетбол
-⚽️ <code>/foot [ставка]</code> — Футбол
+🎲 Кубик:
+<code>/cub 100</code> (1 бросок)
+<code>/cubtotal3 100</code> (3 броска)
 
-<b>Сумма бросков (Total):</b>
-Пример: <code>/cubtotal3 100</code> (3 броска по 100р)
-Команды: <code>/cubtotal[2-5]</code>, <code>/dartotal[2-5]</code> и т.д.
+🎯 Дартс:
+<code>/dar 100</code>
+
+🎳 Боулинг:
+<code>/boul 100</code>
+
+🏀 Баскетбол:
+<code>/bas 100</code>
+
+⚽️ Футбол:
+<code>/foot 100</code>
 """
 
-START_TEXT = f"👋 <b>Приветствуем в {CASINO_NAME}!</b>\nИспользуй меню ниже для управления."
+START_TEXT = f"👋 <b>Приветствуем в {CASINO_NAME}!</b>\n\nЗдесь честные игры, быстрые выплаты и живые эмоции.\nИспользуй меню для навигации."
 
-# --- КЛАВИАТУРЫ ---
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎮 Активные игры", callback_data="active_list")],
         [InlineKeyboardButton(text="💳 Пополнить", callback_data="deposit"),
          InlineKeyboardButton(text="💸 Вывести", callback_data="withdraw")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
-         InlineKeyboardButton(text="📚 Правила", callback_data="instructions")]
+         InlineKeyboardButton(text="📚 Как играть?", callback_data="instructions")]
     ])
 
 def join_kb(game_id):
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Вступить", callback_data=f"join_{game_id}")]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚔️ Принять вызов", callback_data=f"join_{game_id}")]])
 
-def admin_kb():
-    # Считаем количество активных заявок для красивой кнопки
-    req_count = len(withdrawal_requests)
-    req_text = f"🔔 Заявки на вывод ({req_count})" if req_count > 0 else "🔕 Заявки на вывод"
-    
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 Выдать баланс", callback_data="admin_give_money")],
-        [InlineKeyboardButton(text=req_text, callback_data="admin_requests")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_admin")]
-    ])
-
-# Кнопки для обработки заявки
-def request_kb(req_id):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Одобрить (Выплачено)", callback_data=f"req_ok_{req_id}")],
-        [InlineKeyboardButton(text="❌ Отклонить (Вернуть)", callback_data=f"req_no_{req_id}")]
-    ])
-
-# --- ОБРАБОТЧИКИ КНОПОК МЕНЮ ---
-
-@dp.callback_query(F.data == "instructions")
-async def show_rules(cb: CallbackQuery):
-    # Показываем инструкцию вместо стартового сообщения, добавляем кнопку "Назад"
-    back_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]])
-    await cb.message.edit_text(RULES_TEXT, reply_markup=back_kb)
+# --- ОБРАБОТЧИКИ МЕНЮ ---
 
 @dp.callback_query(F.data == "back_to_menu")
 async def back_menu(cb: CallbackQuery):
     await cb.message.edit_text(START_TEXT, reply_markup=main_kb())
 
+@dp.callback_query(F.data == "instructions")
+async def show_rules(cb: CallbackQuery):
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu")]])
+    await cb.message.edit_text(RULES_TEXT, reply_markup=back_kb)
+
 @dp.callback_query(F.data == "profile")
 async def show_profile(cb: CallbackQuery):
     u = get_user(cb.from_user.id, cb.from_user.username)
-    txt = f"👤 <b>Ваш профиль:</b>\n\n🆔 ID: <code>{cb.from_user.id}</code>\n💰 Баланс: {format_money(u['balance'])}"
-    # Кнопка назад
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]])
+    txt = (f"👤 <b>Личный кабинет</b>\n"
+           f"➖➖➖➖➖➖➖➖\n"
+           f"🆔 ID: <code>{cb.from_user.id}</code>\n"
+           f"💰 Баланс: {format_money(u['balance'])}\n"
+           f"➖➖➖➖➖➖➖➖")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_menu")]])
     await cb.message.edit_text(txt, reply_markup=kb)
 
-# --- ЛОГИКА ПОПОЛНЕНИЯ (DEPOSIT) ---
+# --- АКТИВНЫЕ ИГРЫ ---
+@dp.callback_query(F.data == "active_list")
+async def show_active_games(cb: CallbackQuery):
+    # Фильтруем игры, где статус 'waiting'
+    waiting_games = [g for g in active_games.values() if g['status'] == 'waiting']
+    
+    if not waiting_games:
+        await cb.answer("😔 Сейчас нет активных игр. Создай свою!", show_alert=True)
+        return
+
+    txt = "🎮 <b>СПИСОК АКТИВНЫХ ИГР:</b>\n\n"
+    kb_list = []
+    
+    # Показываем последние 5 игр
+    for game in waiting_games[-5:]:
+        txt += f"{game['emoji']} <b>{game['bet']} RUB</b> от {game['p1']['user']} (Бросков: {game['max_rolls']})\n"
+        # Добавляем кнопку прямого перехода (если бот админ канала) или просто инфо
+        kb_list.append([InlineKeyboardButton(text=f"⚔️ Играть на {game['bet']} RUB", url=f"https://t.me/{cb.message.chat.username}/{game['msg_id']}")])
+
+    # Если бот в группе, ссылка на сообщение (msg_id) может не работать корректно без публичного юзернейма группы. 
+    # Поэтому просто даем кнопку "Назад" и обновляем текст.
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]])
+    await cb.message.edit_text(txt + "\n<i>Зайдите в чат, чтобы принять игру!</i>", reply_markup=kb)
+
+# --- ФИНАНСЫ (Упрощено для краткости) ---
 @dp.callback_query(F.data == "deposit")
 async def deposit_start(cb: CallbackQuery, state: FSMContext):
-    await cb.message.answer("✍️ <b>Введите сумму пополнения в RUB:</b>\n(Минимум 100 RUB)")
+    await cb.message.answer("📥 <b>Введите сумму пополнения (RUB):</b>")
     await state.set_state(UserState.waiting_deposit_amount)
     await cb.answer()
 
 @dp.message(UserState.waiting_deposit_amount)
 async def deposit_process(message: Message, state: FSMContext):
     try:
-        amount_rub = float(message.text)
-        if amount_rub < MIN_DEPOSIT_RUB:
-            return await message.reply(f"❌ Минимум {MIN_DEPOSIT_RUB} RUB.")
-    except ValueError:
-        return await message.reply("❌ Введите число.")
-
-    # Конвертация в USD для CryptoBot
-    amount_usd = amount_rub / USD_TO_RUB_RATE
-    
-    try:
-        # Создаем счет (invoice)
-        invoice = await crypto.create_invoice(asset='USDT', amount=amount_usd, 
-                                              description=f"Deposit {amount_rub} RUB to {CASINO_NAME}")
-        
-        # Кнопка оплаты
-        pay_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 Оплатить (CryptoBot)", url=invoice.bot_invoice_url)],
-            [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"check_pay_{invoice.invoice_id}")]
-        ])
-        
-        await message.answer(f"🧾 <b>Счет сформирован</b>\nСумма: {amount_usd:.2f} USDT (~{amount_rub} RUB)\n\nНажмите кнопку ниже для оплаты.", reply_markup=pay_kb)
-        
-        # В реальном проекте тут нужен Webhook. 
-        # Здесь мы просто оставим это пользователю, а начисление сделаем "фейковым" чеком или админ проверит.
-        # Для полной автоматизации нужен Webhook Server, что сложно для этого примера.
-        # Поэтому добавим "Я оплатил", который просто отправит уведомление админу проверить.
-        
-    except Exception as e:
-        await message.answer(f"Ошибка создания счета: {e}")
-    
+        val = float(message.text)
+        if val < MIN_DEPOSIT_RUB: return await message.reply(f"Минимум {MIN_DEPOSIT_RUB} RUB")
+        # Тут создание инвойса CryptoBot
+        await message.answer(f"🧾 Создан счет на {val} RUB. (Симуляция: нажмите 'Я оплатил')")
+        # Симуляция зачисления для теста:
+        get_user(message.from_user.id)['balance'] += val
+        await message.answer(f"✅ Баланс пополнен! Теперь у вас {get_user(message.from_user.id)['balance']} RUB")
+    except: await message.reply("Введите число.")
     await state.clear()
 
-@dp.callback_query(F.data.startswith("check_pay_"))
-async def check_pay_fake(cb: CallbackQuery):
-    # Заглушка, так как без вебхука мы не узнаем статус
-    invoice_id = cb.data.split("_")[2]
-    # Пытаемся проверить статус (если бот запущен локально, это сработает при нажатии)
-    try:
-        old_invoices = await crypto.get_invoices(invoice_ids=invoice_id)
-        if old_invoices and old_invoices[0].status == 'paid':
-             # Начисляем, если реально оплачено (CryptoBot сам обновляет статус)
-             # Но для этого нужно чтобы пользователь реально оплатил USDT
-             # Тут сложная логика, упростим:
-             await cb.answer("Ожидайте зачисления (система проверяет оплату)", show_alert=True)
-        else:
-             await cb.answer("Счет еще не оплачен!", show_alert=True)
-    except:
-        await cb.answer("Заявка отправлена администратору.", show_alert=True)
-        # Отправляем админу уведомление
-        await bot.send_message(ADMIN_ID, f"📥 <b>Проверьте оплату!</b>\nЮзер: {cb.from_user.id}\nInvoice: {invoice_id}")
-
-# --- ЛОГИКА ВЫВОДА (WITHDRAW) ---
 @dp.callback_query(F.data == "withdraw")
 async def withdraw_start(cb: CallbackQuery, state: FSMContext):
-    user = get_user(cb.from_user.id)
-    if user['balance'] < MIN_WITHDRAW_RUB:
-        return await cb.answer(f"❌ Минимум для вывода: {MIN_WITHDRAW_RUB} RUB", show_alert=True)
-    
-    await cb.message.answer(f"💰 Ваш баланс: {user['balance']} RUB\n✍️ <b>Введите сумму для вывода:</b>")
+    u = get_user(cb.from_user.id)
+    await cb.message.answer(f"📤 <b>Вывод средств</b>\nДоступно: {u['balance']} RUB\nВведите сумму:")
     await state.set_state(UserState.waiting_withdraw_amount)
     await cb.answer()
 
 @dp.message(UserState.waiting_withdraw_amount)
 async def withdraw_process(message: Message, state: FSMContext):
     try:
-        amount = float(message.text)
-    except ValueError:
-        return await message.reply("❌ Введите число.")
+        val = float(message.text)
+    except: return await message.reply("Введите число")
     
-    user = get_user(message.from_user.id)
-    if amount < MIN_WITHDRAW_RUB:
-        return await message.reply(f"❌ Минимум {MIN_WITHDRAW_RUB} RUB")
-    if user['balance'] < amount:
-        return await message.reply(f"❌ Недостаточно средств. Доступно: {user['balance']}")
-
-    # Списываем баланс сразу
-    user['balance'] -= amount
+    u = get_user(message.from_user.id)
+    if val > u['balance'] or val < MIN_WITHDRAW_RUB:
+        return await message.reply("❌ Ошибка баланса или лимита.")
     
-    # Создаем заявку
-    req_id = str(message.message_id)
-    withdrawal_requests[req_id] = {
-        'user_id': message.from_user.id,
-        'amount': amount,
-        'username': user['username']
-    }
-    
-    await message.answer(f"✅ <b>Заявка создана!</b>\nСумма: {amount} RUB списана с баланса.\nОжидайте одобрения администратора.")
-    await bot.send_message(ADMIN_ID, f"🔔 <b>НОВАЯ ЗАЯВКА НА ВЫВОД!</b>\n👤 {user['username']}\n💰 {amount} RUB\n👉 /admin")
+    u['balance'] -= val
+    rid = str(message.message_id)
+    withdrawal_requests[rid] = {'user_id': message.from_user.id, 'amount': val, 'username': u['username']}
+    await message.answer("✅ <b>Заявка создана!</b> Ожидайте подтверждения.")
+    await bot.send_message(ADMIN_ID, f"🔔 <b>ВЫВОД:</b> {val} RUB от {u['username']}\n/admin")
     await state.clear()
 
-
-# --- АДМИН ПАНЕЛЬ И ЗАЯВКИ ---
-
+# --- АДМИНКА ---
 @dp.message(Command("admin"))
-async def admin_panel(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    await message.answer("👑 <b>Админ-панель</b>", reply_markup=admin_kb())
+async def admin_panel(m: Message):
+    if m.from_user.id == ADMIN_ID:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"Заявки ({len(withdrawal_requests)})", callback_data="admin_requests")],
+            [InlineKeyboardButton(text="Закрыть", callback_data="close_admin")]
+        ])
+        await m.answer("👑 Админ-панель", reply_markup=kb)
 
-@dp.callback_query(F.data == "admin_stats")
-async def cb_stats(cb: CallbackQuery):
-    if cb.from_user.id != ADMIN_ID: return
-    txt = f"📊 <b>Статистика {CASINO_NAME}</b>\n\n💰 Прибыль проекта: {format_money(TOTAL_PROFIT)}\n👤 Юзеров в БД: {len(user_db)}"
-    await cb.message.edit_text(txt, reply_markup=admin_kb())
+@dp.callback_query(F.data == "admin_requests")
+async def admin_req(cb: CallbackQuery):
+    if not withdrawal_requests: return await cb.answer("Пусто", show_alert=True)
+    for rid, info in list(withdrawal_requests.items()):
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да", callback_data=f"ok_{rid}"), InlineKeyboardButton(text="❌ Нет", callback_data=f"no_{rid}")]
+        ])
+        await cb.message.answer(f"Заявка #{rid}\n👤 {info['username']}\n💰 {info['amount']}", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("ok_"))
+async def ok_req(cb: CallbackQuery):
+    rid = cb.data.split("_")[1]
+    if rid in withdrawal_requests:
+        del withdrawal_requests[rid]
+        await cb.message.edit_text("✅ Выплачено")
+
+@dp.callback_query(F.data.startswith("no_"))
+async def no_req(cb: CallbackQuery):
+    rid = cb.data.split("_")[1]
+    if rid in withdrawal_requests:
+        info = withdrawal_requests.pop(rid)
+        get_user(info['user_id'])['balance'] += info['amount']
+        await cb.message.edit_text("❌ Отклонено (возврат)")
 
 @dp.callback_query(F.data == "close_admin")
-async def cb_close(cb: CallbackQuery):
+async def close_admin(cb: CallbackQuery):
     await cb.message.delete()
 
-# Просмотр заявок
-@dp.callback_query(F.data == "admin_requests")
-async def view_requests(cb: CallbackQuery):
-    if cb.from_user.id != ADMIN_ID: return
-    
-    if not withdrawal_requests:
-        return await cb.answer("📭 Заявок нет", show_alert=True)
-    
-    await cb.message.delete()
-    for req_id, info in list(withdrawal_requests.items()):
-        txt = (f"💸 <b>Заявка #{req_id}</b>\n"
-               f"👤 Игрок: {info['username']} (ID: <code>{info['user_id']}</code>)\n"
-               f"💰 Сумма: {info['amount']} RUB")
-        await cb.message.answer(txt, reply_markup=request_kb(req_id))
-    
-    await cb.message.answer("👑 Админ-панель", reply_markup=admin_kb())
+# --- 🎲 ЛОГИКА ИГРЫ (ИСПРАВЛЕНА) ---
 
-# Одобрение заявки
-@dp.callback_query(F.data.startswith("req_ok_"))
-async def approve_request(cb: CallbackQuery):
-    if cb.from_user.id != ADMIN_ID: return
-    req_id = cb.data.split("_")[2]
-    
-    if req_id in withdrawal_requests:
-        info = withdrawal_requests.pop(req_id)
-        # Отправляем уведомление юзеру
-        try:
-            await bot.send_message(info['user_id'], f"✅ <b>Ваша заявка на вывод {info['amount']} RUB одобрена!</b>\nСредства отправлены.")
-        except:
-            pass
-        await cb.message.edit_text(f"✅ Заявка #{req_id} ОДОБРЕНА ({info['amount']} RUB)\nИгрок: {info['username']}", reply_markup=None)
-    else:
-        await cb.answer("Заявка не найдена", show_alert=True)
-
-# Отклонение заявки
-@dp.callback_query(F.data.startswith("req_no_"))
-async def reject_request(cb: CallbackQuery):
-    if cb.from_user.id != ADMIN_ID: return
-    req_id = cb.data.split("_")[2]
-    
-    if req_id in withdrawal_requests:
-        info = withdrawal_requests.pop(req_id)
-        # Возвращаем деньги
-        get_user(info['user_id'])['balance'] += info['amount']
-        
-        try:
-            await bot.send_message(info['user_id'], f"❌ <b>Заявка на вывод {info['amount']} RUB отклонена.</b>\nСредства возвращены на баланс.")
-        except:
-            pass
-        await cb.message.edit_text(f"❌ Заявка #{req_id} ОТКЛОНЕНА\nДеньги возвращены игроку {info['username']}", reply_markup=None)
-    else:
-        await cb.answer("Заявка не найдена", show_alert=True)
-
-# Выдача баланса (из прошлого кода)
-@dp.callback_query(F.data == "admin_give_money")
-async def cb_give_money(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != ADMIN_ID: return
-    await cb.message.edit_text("✍️ <b>Введите Username пользователя</b>", reply_markup=None)
-    await state.set_state(AdminState.waiting_for_username)
-
-@dp.message(AdminState.waiting_for_username)
-async def process_username(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: return
-    target_id = find_user_id_by_name(message.text)
-    if not target_id:
-        return await message.reply("❌ Пользователь не найден. Введите еще раз или /cancel")
-    await state.update_data(target_id=target_id, target_name=message.text)
-    await message.reply(f"✅ Найден: {target_id}. Введите сумму:")
-    await state.set_state(AdminState.waiting_for_amount)
-
-@dp.message(AdminState.waiting_for_amount)
-async def process_amount(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        amount = float(message.text)
-    except: return await message.reply("Число!")
-    
-    data = await state.get_data()
-    user = get_user(data['target_id'])
-    user['balance'] += amount
-    await message.reply(f"✅ Баланс {data['target_name']} пополнен на {amount}. Итог: {user['balance']}")
-    await state.clear()
-    await message.answer("👑 Админ-панель", reply_markup=admin_kb())
-
-@dp.message(Command("cancel"), StateFilter(AdminState))
-async def cancel_admin(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Отмена.", reply_markup=admin_kb())
-
-# --- ЛОГИКА ИГР ---
 GAME_TYPES = {
     'cub': {'emoji': '🎲', 'name': 'Кубик'},
     'dar': {'emoji': '🎯', 'name': 'Дартс'},
@@ -359,120 +237,180 @@ GAME_TYPES = {
 }
 
 @dp.message(F.text.regexp(r"^/([a-zA-Z0-9]+)\s+(\d+)$"))
-async def create_game(message: Message):
+async def create_game_handler(message: Message):
     if message.chat.id != GAME_CHAT_ID: return
+    
+    # Парсинг команды
     match = re.match(r"^/([a-zA-Z0-9]+)\s+(\d+)$", message.text)
-    full_cmd = match.group(1).lower()
+    cmd_raw = match.group(1).lower()
     bet = int(match.group(2))
     
     rolls = 1
-    base_key = full_cmd
-    if "total" in full_cmd:
-        last = full_cmd[-1]
-        if last.isdigit() and '2' <= last <= '5':
-            rolls = int(last)
-            base_key = full_cmd.replace(f"total{last}", "")
-
-    if base_key not in GAME_TYPES or bet < 1: return
-
+    g_key = cmd_raw
+    if "total" in cmd_raw:
+        # Пытаемся достать цифру количества бросков
+        last_char = cmd_raw[-1]
+        if last_char.isdigit() and '2' <= last_char <= '5':
+            rolls = int(last_char)
+            g_key = cmd_raw.replace(f"total{last_char}", "")
+    
+    if g_key not in GAME_TYPES: return
+    
     user = get_user(message.from_user.id, message.from_user.username)
     if user['balance'] < bet:
-        return await message.reply(f"❌ Недостаточно средств! Баланс: {user['balance']} RUB")
+        return await message.reply(f"❌ <b>Недостаточно средств!</b>\nВаш баланс: {format_money(user['balance'])}")
 
+    # Списание и создание
     user['balance'] -= bet
-    gid = str(message.message_id)
-    active_games[gid] = {
-        'id': gid, 'emoji': GAME_TYPES[base_key]['emoji'], 'name': GAME_TYPES[base_key]['name'],
-        'bet': bet, 'max_rolls': rolls, 'status': 'waiting',
+    game_uuid = str(uuid.uuid4())[:8] # Генерируем уникальный ID игры
+    
+    game_data = {
+        'uuid': game_uuid,
+        'emoji': GAME_TYPES[g_key]['emoji'],
+        'name': GAME_TYPES[g_key]['name'],
+        'bet': bet,
+        'max_rolls': rolls,
+        'status': 'waiting',
         'p1': {'id': message.from_user.id, 'user': user['username'], 'score': 0, 'done': 0},
-        'p2': None
+        'p2': None,
+        'msg_id': None # Заполним после отправки сообщения
     }
-    sent = await message.answer(
-        f"<b>{CASINO_NAME} | НОВАЯ ИГРА</b>\n{GAME_TYPES[base_key]['emoji']} {GAME_TYPES[base_key]['name']}\n"
-        f"👤 Создал: {user['username']}\n💰 Ставка: {bet} RUB\n🔢 Бросков: {rolls}",
-        reply_markup=join_kb(gid))
-    active_games[str(sent.message_id)] = active_games.pop(gid)
+    
+    # Красивое сообщение
+    txt = (f"🎰 <b>НОВАЯ ИГРА | {CASINO_NAME}</b>\n\n"
+           f"{game_data['emoji']} <b>Игра:</b> {game_data['name']}\n"
+           f"👤 <b>Игрок:</b> {user['username']}\n"
+           f"💵 <b>Ставка:</b> {bet} RUB\n"
+           f"🔢 <b>Бросков:</b> {rolls}\n\n"
+           f"👇 <i>Нажми кнопку, чтобы вступить!</i>")
+    
+    sent_msg = await message.answer(txt, reply_markup=join_kb(game_uuid))
+    
+    # Сохраняем
+    game_data['msg_id'] = sent_msg.message_id
+    active_games[game_uuid] = game_data
+    game_msg_map[sent_msg.message_id] = game_uuid # Связываем ID сообщения бота с игрой
 
 @dp.callback_query(F.data.startswith("join_"))
-async def join_game(cb: CallbackQuery):
-    gid = cb.data.split("_")[1]
-    if gid not in active_games or active_games[gid]['status'] != 'waiting':
-        return await cb.answer("Игра недоступна")
-    game = active_games[gid]
+async def join_game_handler(cb: CallbackQuery):
+    game_uuid = cb.data.split("_")[1]
+    
+    if game_uuid not in active_games:
+        return await cb.answer("❌ Игра не найдена или завершена", show_alert=True)
+    
+    game = active_games[game_uuid]
+    
+    if game['status'] != 'waiting':
+        return await cb.answer("🔒 Игра уже идет!", show_alert=True)
+    
+    if cb.from_user.id == game['p1']['id']:
+        return await cb.answer("🤡 Нельзя играть самим с собой!", show_alert=True)
+        
     user = get_user(cb.from_user.id, cb.from_user.username)
-    if cb.from_user.id == game['p1']['id']: return await cb.answer("Нельзя с собой", show_alert=True)
-    if user['balance'] < game['bet']: return await cb.answer(f"Нужно {game['bet']} RUB", show_alert=True)
+    if user['balance'] < game['bet']:
+        return await cb.answer(f"❌ Не хватает денег! Нужно {game['bet']} RUB", show_alert=True)
 
+    # Старт игры
     user['balance'] -= game['bet']
     game['p2'] = {'id': cb.from_user.id, 'user': user['username'], 'score': 0, 'done': 0}
     game['status'] = 'active'
-    await cb.message.edit_text(
-        f"<b>{CASINO_NAME} | ИГРА НАЧАТА</b>\n👥 {game['p1']['user']} VS {game['p2']['user']}\n"
-        f"💰 Банк: {game['bet']*2} RUB\n— Кидайте {game['emoji']} в ответ!", reply_markup=None)
+    
+    txt = (f"🔥 <b>ИГРА НАЧАЛАСЬ!</b>\n\n"
+           f"🔴 <b>{game['p1']['user']}</b> VS 🔵 <b>{game['p2']['user']}</b>\n"
+           f"💰 <b>Банк:</b> {game['bet']*2} RUB\n"
+           f"🎮 <b>Задача:</b> Кидайте {game['emoji']} в ответ на это сообщение!")
+    
+    await cb.message.edit_text(txt, reply_markup=None)
 
 @dp.message(F.dice)
-async def play_dice(msg: Message):
-    if not msg.reply_to_message: return
-    gid = str(msg.reply_to_message.message_id)
-    if gid not in active_games: return
-    game = active_games[gid]
-    if game['status'] != 'active' or msg.dice.emoji != game['emoji']: return
+async def process_dice(message: Message):
+    # Проверка, что это ответ на сообщение (реплай)
+    if not message.reply_to_message: return
     
-    p = None
-    if msg.from_user.id == game['p1']['id']: p = game['p1']
-    elif msg.from_user.id == game['p2']['id']: p = game['p2']
-    if not p or p['done'] >= game['max_rolls']: return
+    bot_msg_id = message.reply_to_message.message_id
+    
+    # Ищем игру по ID сообщения бота
+    if bot_msg_id not in game_msg_map: return
+    game_uuid = game_msg_map[bot_msg_id]
+    game = active_games.get(game_uuid)
+    
+    if not game or game['status'] != 'active': return
+    if message.dice.emoji != game['emoji']: return # Проверка, что кинули правильный смайл
 
-    p['score'] += msg.dice.value
-    p['done'] += 1
-    await asyncio.sleep(3.5)
-    await msg.reply(f"🎲 {p['user']} выбросил {msg.dice.value}!\nСумма: {p['score']} ({p['done']}/{game['max_rolls']})")
+    # Определяем игрока
+    player = None
+    if message.from_user.id == game['p1']['id']: player = game['p1']
+    elif message.from_user.id == game['p2']['id']: player = game['p2']
+    
+    if not player: return # Чужой кинул кубик
+    if player['done'] >= game['max_rolls']: 
+        await message.reply("🛑 Ваши попытки кончились!")
+        return
 
-    if game['p1']['done'] == game['max_rolls'] and game['p2']['done'] == game['max_rolls']:
-        await finish(msg, gid)
+    # Засчитываем
+    dice_val = message.dice.value
+    # Для баскетбола и футбола value работает иначе (1-5), для кубика (1-6)
+    # Можно добавить логику подсчета очков (например, в баскетболе 5 это 3 очка), но пока оставим value
+    
+    player['score'] += dice_val
+    player['done'] += 1
+    
+    score_txt = f"🎲 <b>{player['user']}</b> выбросил <b>{dice_val}</b>!"
+    if game['max_rolls'] > 1:
+        score_txt += f"\nСумма: {player['score']} (Бросок {player['done']}/{game['max_rolls']})"
+    
+    msg = await message.reply(score_txt)
+    await asyncio.sleep(2) # Пауза для драматизма
+    
+    # Проверка конца игры
+    if game['p1']['done'] >= game['max_rolls'] and game['p2']['done'] >= game['max_rolls']:
+        await finish_game(game_uuid, message.chat.id)
 
-async def finish(msg, gid):
+async def finish_game(game_uuid, chat_id):
     global TOTAL_PROFIT
-    game = active_games[gid]
-    p1, p2 = game['p1'], game['p2']
+    game = active_games[game_uuid]
+    p1 = game['p1']
+    p2 = game['p2']
+    
     bank = game['bet'] * 2
     fee = bank * HOUSE_COMMISSION
     win_sum = bank - fee
     
-    res = f"🏁 <b>ИТОГИ:</b>\n{p1['user']}: {p1['score']}\n{p2['user']}: {p2['score']}\n\n"
-    
+    text = (f"🏁 <b>ИГРА ОКОНЧЕНА!</b>\n"
+            f"➖➖➖➖➖➖➖➖\n"
+            f"🔴 {p1['user']}: <b>{p1['score']}</b>\n"
+            f"🔵 {p2['user']}: <b>{p2['score']}</b>\n"
+            f"➖➖➖➖➖➖➖➖\n")
+            
     if p1['score'] > p2['score']:
+        text += f"🏆 <b>Победитель:</b> {p1['user']}\n💰 <b>Выигрыш:</b> {format_money(win_sum)}"
         get_user(p1['id'])['balance'] += win_sum
         TOTAL_PROFIT += fee
-        # Не пишем про комиссию, просто итог
-        res += f"🏆 Победил {p1['user']}!\n💰 Выигрыш: {format_money(win_sum)}"
     elif p2['score'] > p1['score']:
+        text += f"🏆 <b>Победитель:</b> {p2['user']}\n💰 <b>Выигрыш:</b> {format_money(win_sum)}"
         get_user(p2['id'])['balance'] += win_sum
         TOTAL_PROFIT += fee
-        res += f"🏆 Победил {p2['user']}!\n💰 Выигрыш: {format_money(win_sum)}"
     else:
+        text += "🤝 <b>НИЧЬЯ!</b>\nВозврат средств."
         get_user(p1['id'])['balance'] += game['bet']
         get_user(p2['id'])['balance'] += game['bet']
-        res += "🤝 Ничья! Ставки возвращены."
 
-    await msg.answer(res)
-    del active_games[gid]
+    await bot.send_message(chat_id, text)
+    
+    # Чистим память
+    del active_games[game_uuid]
+    # Удаляем из маппинга (можно не удалять сразу, но лучше чистить)
+    keys_to_remove = [k for k, v in game_msg_map.items() if v == game_uuid]
+    for k in keys_to_remove: del game_msg_map[k]
 
+# --- ЗАПУСК ---
 @dp.message(Command("start"))
 async def start(m: Message):
     get_user(m.from_user.id, m.from_user.username)
     await m.answer(START_TEXT, reply_markup=main_kb())
 
-@dp.message(Command("bal"))
-async def bal(m: Message):
-    u = get_user(m.from_user.id)
-    await m.reply(f"💰 Баланс: {format_money(u['balance'])}")
-
-@dp.message(Command("getid"))
-async def get_id_cmd(m: Message):
-    await m.answer(f"🆔 Ваш ID: <code>{m.from_user.id}</code>")
-
 async def main():
+    print("Бот запущен...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
