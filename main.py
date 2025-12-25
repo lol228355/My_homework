@@ -18,7 +18,7 @@ BOT_TOKEN = "8315937988:AAHaKhMNy0t-uXQjSumvkDk3nf2vyTHf63U"
 GAME_CHAT_ID = -1003582415216 # ID твоего игрового чата
 ADMIN_ID = 7323981601         # Твой Telegram ID
 
-CASINO_NAME = "FRK | CASINO ♣️"
+CASINO_NAME = "Andron | CASINO ♣️"
 HOUSE_COMMISSION = 0.10 # Комиссия 10%
 
 logging.basicConfig(level=logging.INFO)
