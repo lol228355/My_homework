@@ -17,9 +17,9 @@ GAME_CHAT_ID = -1003582415216  # ID вашего чата
 ADMIN_ID = 7323981601 # Ваш ID
 
 CASINO_NAME = "Andron"
-MIN_DEPOSIT_RUB = 100.0
+MIN_DEPOSIT_RUB = 50.0
 MIN_WITHDRAW_RUB = 150.0
-USD_TO_RUB_RATE = 100.0 # Курс для конвертации пополнений
+USD_TO_RUB_RATE = 50.0 # Курс для конвертации пополнений
 HOUSE_COMMISSION = 0.10  # 10% (скрытая)
 
 # Логирование
